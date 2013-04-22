@@ -56,5 +56,16 @@
       }
    },
    "release_status" : "unstable",
+   "resources" : {
+      "bugtracker" : {
+         "web" : "https://github.com/kazeburo/Starcross/issues"
+      },
+      "homepage" : "https://github.com/kazeburo/Starcross",
+      "repository" : {
+         "type" : "git",
+         "url" : "git://github.com/kazeburo/Starcross.git",
+         "web" : "https://github.com/kazeburo/Starcross"
+      }
+   },
    "version" : "0.01"
 }

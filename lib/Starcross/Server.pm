@@ -9,8 +9,6 @@ use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
 use AnyEvent::Util qw(fh_nonblocking guard);
-use AnyEvent::Handle;
-use AnyEvent::Socket;
 use File::Temp;
 
 use Carp ();
