@@ -123,9 +123,12 @@ sub connection_manager {
     };
 
     my %sockets;
-    #my $at; $at = AE::timer 0, 1, sub {
-    #        warn scalar keys %sockets;
-    #};
+    my $at; $at = AE::timer 0, 1, sub {
+        my $time = time;
+        for my $key ( keys %sockets ) {
+            delete $sockets{$key} if $time - $sockets{$key}->[1] > $self->{keepalive_timeout};
+        }
+    };
     my $hd = new AnyEvent::Handle 
         fh => $self->{pipe_info}->[READER];
     $hd->on_read(sub {
