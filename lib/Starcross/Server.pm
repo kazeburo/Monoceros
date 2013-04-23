@@ -13,7 +13,7 @@ use File::Temp;
 
 use Carp ();
 use Plack::Util;
-use POSIX qw(EINTR EAGAIN EWOULDBLOCK EDOM :sys_wait_h);
+use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use Fcntl qw(:flock);
 
@@ -64,36 +64,23 @@ sub run_workers {
 sub ae_queued_fdsend {
     my $self = shift;
     my $socket = shift;
-    my $data = shift;
+    my $conn = shift;
 
     my $queue_key = sprintf "fd_send_queue_%d", fileno $socket;
     my $worker_key = sprintf "fd_send_worker_%d", fileno $socket;
     $self->{$queue_key} ||= [];
 
-    push @{$self->{$queue_key}}, $data;
+    push @{$self->{$queue_key}},  $conn;
     $self->{$worker_key} ||= AE::io $socket, 1, sub {
         do {
-            if ( ref $self->{$queue_key}->[0] ) {
-                # send fh
-                if ( ! IO::FDPass::send(fileno $socket, fileno ${$self->{$queue_key}->[0]} ) ) {
-                    return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                    undef $self->{$worker_key};
-                    die "unable to pass file handle: $!"; 
-                }
-                close(${$self->{$queue_key}->[0]});
-                shift @{$self->{$queue_key}};
-            } else {
-                # send string
-                my $len = syswrite $socket, $self->{$queue_key}->[0];
-                unless ($len) {
-                    return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                    undef $self->{$worker_key};
-                    die "command write failure: $!";
-                }
-
-                my $c = substr $self->{$queue_key}->[0], 0, $len, "";
-                shift @{$self->{$queue_key}} unless length $self->{$queue_key}->[0];
+            # send fh
+            if ( ! IO::FDPass::send(fileno $socket, fileno ${$self->{$queue_key}->[0]}) ) {
+                return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
+                undef $self->{$worker_key};
+                die "unable to pass file handle: $!"; 
             }
+            close(${$self->{$queue_key}->[0]});
+            shift @{$self->{$queue_key}};
         } while @{$self->{$queue_key}};
         undef $self->{$worker_key};
     };
@@ -103,7 +90,7 @@ sub ae_queued_fdsend {
 
 sub connection_manager {
     my ($self, $worker_pid) = @_;
-    #local $SIG{PIPE} = 'IGNORE';
+    local $SIG{PIPE} = 'IGNORE';
 
     fh_nonblocking $self->{listen_sock}, 1;
     $self->{pipe_lstn}->[READER]->close;
@@ -134,9 +121,7 @@ sub connection_manager {
     
     $master{server_io} = AE::io $self->{listen_sock}, 0, sub {
         while ( $self->{listen_sock} && (my $fh = $self->{listen_sock}->accept) ) {
-            fh_nonblocking $fh, 1;
-            setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
-                or die "setsockopt(TCP_NODELAY) failed:$!";
+            #fh_nonblocking $fh, 1;
             $reqs++;
             my $w; $w = AE::io $fh, 0, sub {
                 $self->ae_queued_fdsend($self->{pipe_lstn}->[WRITER],\$fh);
@@ -171,9 +156,8 @@ sub request_worker {
     $self->{listen_sock}->close;
     $self->{pipe_lstn}->[WRITER]->close;
     $self->{pipe_worker}->[READER]->close;
-    #$self->{pipe_lstn}->[READER]->blocking(0);
 
-    my ($tmp_lock_fh, $lock_filename) = File::Temp::tempfile(EXLOCK=>1, UNLINK=>0);
+    my ($tmp_lock_fh, $lock_filename) = File::Temp::tempfile(UNLINK=>0);
     close($tmp_lock_fh);
 
     # use Parallel::Prefork
@@ -205,7 +189,6 @@ $|=1;
             $self->{can_exit} = 1;
             #open(my $lock_fh, '>', $lock_filename) or die $!;
             
-
             local $SIG{TERM} = sub {
                 exit 0 if $self->{can_exit};
                 $self->{term_received}++;
@@ -220,13 +203,19 @@ $|=1;
                     next;
                 }
                 #flock($lock_fh, LOCK_EX | LOCK_NB) or next;
-                #my $len = sysread($self->{pipe_lstn}->[READER], my $session, 1, 0);
                 my $fd = IO::FDPass::recv(fileno $self->{pipe_lstn}->[READER]);
                 die "couldnot read pipe: $!" if $fd < 0;
                 #flock($lock_fh, LOCK_UN);
                 
                 ++$proc_req_count;
                 my $conn = IO::Socket::INET->new_from_fd($fd,'w');
+                my $is_keepalive = 1;
+                my $nodelay = getsockopt($conn, IPPROTO_TCP, TCP_NODELAY);
+                if ( ! unpack("I", $nodelay) ) {
+                    setsockopt($conn, IPPROTO_TCP, TCP_NODELAY, 1)
+                        or die "setsockopt(TCP_NODELAY) failed:$!";
+                    $is_keepalive = 0;
+                }
                 
                 my $env = {
                     SERVER_PORT => $self->{port},
@@ -246,7 +235,7 @@ $|=1;
                     'psgix.io'          => $conn,
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
-                my $keepalive = $self->handle_connection($env, $conn, $app, 1, 0);
+                my $keepalive = $self->handle_connection($env, $conn, $app, 1, $is_keepalive);
                 if ( !$self->{term_received} && $keepalive ) {
                     IO::FDPass::send(fileno $self->{pipe_worker}->[WRITER], fileno $conn)
                             or die "unable to pass file handle: $!";
