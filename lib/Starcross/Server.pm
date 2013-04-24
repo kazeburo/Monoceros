@@ -30,9 +30,9 @@ sub run {
 
 sub setup_sockpair {
     my $self = shift;
-    my @pipe_worker = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
+    my @worker_pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
         or die "failed to create socketpair: $!";
-    $self->{pipe_worker} = \@pipe_worker; 
+    $self->{worker_pipe} = \@worker_pipe; 
 
     my @lstn_pipes;
     for (0..2) {
@@ -41,18 +41,6 @@ sub setup_sockpair {
         push @lstn_pipes, \@pipe_lstn;
     }
     $self->{lstn_pipes} = \@lstn_pipes;
-
-    my ($fh, $filename) = File::Temp::tempfile(UNLINK => 0);
-    close($fh);
-    unlink($filename);
-    $self->{internal_sock_file} = $filename;
-
-    my $internal_sock = IO::Socket::UNIX->new(
-        Type  => SOCK_STREAM,
-        Local => $self->{internal_sock_file},
-        Listen => SOMAXCONN,
-    ) or die "cannot connect internal socket: $!";
-    $self->{internal_sock} = $internal_sock;
 
     1;
 }
@@ -120,9 +108,8 @@ sub connection_manager {
         $self->{lstn_pipes}[$_][READER]->close;
         fh_nonblocking $self->{lstn_pipes}[$_][WRITER], 1;
     }
-    $self->{pipe_worker}->[WRITER]->close;    
-    fh_nonblocking $self->{pipe_worker}->[READER], 1;
-    fh_nonblocking $self->{internal_sock}, 1;
+    $self->{worker_pipe}->[WRITER]->close;    
+    fh_nonblocking $self->{worker_pipe}->[READER], 1;
     fh_nonblocking $self->{listen_sock}, 1;
 
     my %manager;
@@ -149,29 +136,6 @@ sub connection_manager {
              && $time - $sockets{$key}->[1] > $self->{keepalive_timeout};
         }
     };
-
-    $manager{internal_listener} = AE::io $self->{internal_sock}, 0, sub {
-        my ($fh,$peer) = $self->{internal_sock}->accept;
-        return unless $fh;
-        my $internal;
-        $internal = new AnyEvent::Handle 
-            fh => $fh,
-            on_eof => sub { undef $internal };
-        $internal->on_read(sub{
-            my $handle = shift;
-            $handle->push_read( chunk => 36, sub {
-                my ($method,$remote) = split / /, $_[1], 2;
-                if ( $method eq 'del' ) {
-                    delete $sockets{$remote};
-                } elsif ( $method eq 'req' ) {
-                    my $reqs = exists $sockets{$remote} ? $sockets{$remote}->[2] 
-                                                        : $self->{max_reqs_per_child} + 1;
-                    $reqs = $self->{max_reqs_per_child} + 1 if $term_received;
-                    $handle->push_write(sprintf('% 64s',$reqs));
-                }
-            });
-        });
-    };
     
     $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
         return unless $self->{listen_sock};
@@ -194,28 +158,28 @@ sub connection_manager {
         }
     };
 
-    $manager{worker_listener} = AE::io $self->{pipe_worker}->[READER], 0, sub {
-        my $fd = IO::FDPass::recv(fileno $self->{pipe_worker}->[READER]);
-        return if $fd < 0;
-        my $conn = IO::Socket::INET->new_from_fd($fd,'r')
-            or die "unable to convert file descriptor to handle: $!";
-        my $remote = $conn->peername;
-        return unless $remote; #??
-        $remote = md5_hex($remote);
+    $manager{worker_listener} =  AnyEvent::Handle->new(
+        fh => $self->{worker_pipe}->[READER],
+        on_read => sub {
+            my $handle = shift;
+            $handle->push_read( chunk => 36, sub {
+                my ($method,$remote) = split / /, $_[1], 2;
+                if ( $method eq 'end' ) {
+                    delete $sockets{$remote};
+                } elsif ( $method eq 'kep' ) {
+                    return unless exists $sockets{$remote};
+                    $sockets{$remote}->[1] = time;
+                    $sockets{$remote}->[2]++;
+                    $sockets{$remote}->[3] = 1;
+                    my $w; $w = AE::io $sockets{$remote}->[0], 0, sub {
+                        $self->queued_fdsend($sockets{$remote});
+                        undef $w;
+                    };
+                }
+            });
+        },
+    );
 
-        my $keepalive_reqs = 0;
-        if ( exists $sockets{$remote} ) {
-            $keepalive_reqs = $sockets{$remote}->[2];
-            $keepalive_reqs++;
-        }
-
-        $sockets{$remote} = [$conn,time,$keepalive_reqs,1];
-
-        my $w; $w = AE::io $conn, 0, sub {
-            $self->queued_fdsend($sockets{$remote});
-            undef $w;
-        };
-    };
     $cv->recv;
     \%manager;
 }
@@ -224,8 +188,7 @@ sub request_worker {
     my ($self,$app) = @_;
 
     $self->{listen_sock}->close;
-    $self->{pipe_worker}->[READER]->close;
-    $self->{internal_sock}->close;
+    $self->{worker_pipe}->[READER]->close;
 
     for (0..2) {
         $self->{lstn_pipes}[$_][WRITER]->close;
@@ -264,11 +227,7 @@ sub request_worker {
                 
             };
             local $SIG{PIPE} = 'IGNORE';
-            
-            my $internal_sock = IO::Socket::UNIX->new(
-                Peer => $self->{internal_sock_file}
-            ) or die "cannot connect internal socket: $!";
- 
+             
             while ( $proc_req_count < $max_reqs_per_child ) {
                 my @can_read = $select_lstn_pipes->can_read(1);
                 if ( !@can_read ) {
@@ -316,13 +275,11 @@ sub request_worker {
                 $self->{_is_deferred_accept} = 1; #ready to read
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != 2, $pipe_n == 0);
                 
+                my $method = 'end';
                 if ( !$self->{term_received} && $keepalive ) {
-                    IO::FDPass::send(fileno $self->{pipe_worker}->[WRITER], fileno $conn)
-                            or die "unable to pass file handle: $!";
+                    $method = 'kep';
                 }
-                else {
-                    $internal_sock->syswrite("del $remote");
-                }
+                $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
             }
         });
     }
