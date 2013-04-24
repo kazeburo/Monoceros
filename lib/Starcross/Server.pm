@@ -147,11 +147,11 @@ sub connection_manager {
             on_eof => sub { undef $internal };
         $internal->on_read(sub{
             my $handle = shift;
-            $handle->push_read( line => sub {
+            $handle->push_read( chunk => 36, sub {
                 my ($method,$remote) = split / /, $_[1], 2;
-                if ( $method eq 'delete' ) {
+                if ( $method eq 'del' ) {
                     delete $sockets{$remote};
-                } elsif ( $method eq 'req_count' ) {
+                } elsif ( $method eq 'req' ) {
                     $handle->push_write(sprintf('% 128s',$sockets{$remote}->[2]));
                 }
             });
@@ -264,7 +264,7 @@ sub request_worker {
                 next unless $peername; #??
                 my ($peerport,$peerhost) = unpack_sockaddr_in $peername;
                 my $remote = md5_hex($peername);
-                $internal_sock->syswrite("req_count $remote\n");
+                $internal_sock->syswrite("req $remote");
                 $internal_sock->sysread(my $req_count, 128);
                 $req_count++;
                 my $may_keepalive = $req_count < $self->{max_keepalive_reqs};
@@ -294,7 +294,7 @@ sub request_worker {
                             or die "unable to pass file handle: $!";
                 }
                 else {
-                    $internal_sock->syswrite("delete $remote\n");
+                    $internal_sock->syswrite("del $remote");
                 }
             }
         });
