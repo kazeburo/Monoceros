@@ -1,4 +1,4 @@
-package Starcross::Server;
+package Monoceros::Server;
 
 use strict;
 use warnings;
@@ -20,6 +20,59 @@ use List::Util qw/shuffle first/;
 
 use constant WRITER => 0;
 use constant READER => 1;
+
+sub new {
+    my $class = shift;
+    my %args = @_;
+
+    # setup before instantiation
+    my $listen_sock;
+    if (defined $ENV{SERVER_STARTER_PORT}) {
+        my ($hostport, $fd) = %{Server::Starter::server_ports()};
+        if ($hostport =~ /(.*):(\d+)/) {
+            $args{host} = $1;
+            $args{port} = $2;
+        } else {
+            $args{port} = $hostport;
+        }
+        $listen_sock = IO::Socket::INET->new(
+            Proto => 'tcp',
+        ) or die "failed to create socket:$!";
+        $listen_sock->fdopen($fd, 'w')
+            or die "failed to bind to listening socket:$!";
+    }
+    my $max_workers = 10;
+    for (qw(max_workers workers)) {
+        $max_workers = delete $args{$_}
+            if defined $args{$_};
+    }
+
+    my $self = bless {
+        host                 => $args{host} || 0,
+        port                 => $args{port} || 8080,
+        max_workers          => $max_workers,
+        timeout              => $args{timeout} || 300,
+        keepalive_timeout    => $args{keepalive_timeout} || 5,
+        max_keepalive_reqs   => $args{max_keepalive_reqs} || 100,
+        server_software      => $args{server_software} || $class,
+        server_ready         => $args{server_ready} || sub {},
+        min_reqs_per_child   => (
+            defined $args{min_reqs_per_child}
+                ? $args{min_reqs_per_child} : undef,
+        ),
+        max_reqs_per_child   => (
+            $args{max_reqs_per_child} || $args{max_requests} || 100,
+        ),
+        err_respawn_interval => (
+            defined $args{err_respawn_interval}
+                ? $args{err_respawn_interval} : undef,
+        ),
+        _using_defer_accept  => undef,
+        listen_sock => ( defined $listen_sock ? $listen_sock : undef),
+    }, $class;
+
+    $self;
+}
 
 sub run {
     my ($self, $app) = @_;

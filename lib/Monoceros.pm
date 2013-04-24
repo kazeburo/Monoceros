@@ -1,10 +1,10 @@
-package Starcross;
+package Monoceros;
+
 use strict;
 use warnings;
 use 5.008005;
+
 our $VERSION = "0.01";
-
-
 
 1;
 __END__
@@ -13,17 +13,69 @@ __END__
 
 =head1 NAME
 
-Starcross - It's new $module
+Monoceros - PSGI/Plack server with event drived connection manager, preforking workers
 
 =head1 SYNOPSIS
 
-    use Starcross;
+    % plackup -s Monoceros --max-keepalive-reqs=10000 --max-workers=2 -a app.psgi
 
 =head1 DESCRIPTION
 
-Starcross is ...
+Monoceros is PSGI/Plack server supports HTTP/1.0. Monoceros has a event-driven 
+connection manager and preforking workers. Monoceros can keep large amount of 
+connection at minimal processes.
 
-=head1 LICENSE
+                                                          +--------+
+                                                      +---+ worker |
+          TCP       +---------+   UNIX DOMAIN SOCKET  |   +--------+
+    --------------- | manager | ----------------------+ 
+                    +---------+                       |   +--------+
+    <- keepalive ->              <-- passing fds -->  `---+ worker |
+                                                          +--------+
+
+And this server inherit L<Starlet>. Monoceros supports following features too.
+
+- prefork and graceful shutdown using L<Parallel::Prefork>
+
+- hot deploy using L<Server::Starter>
+
+- fast HTTP processing using L<HTTP::Parser::XS> (optional)
+
+But Monoceros does not support spawn-interval.
+
+=head1 COMMAND LINE OPTIONS
+
+In addition to the options supported by L<plackup>, Monoceros accepts following options(s).
+
+=head2 --max-workers=#
+
+number of worker processes (default: 10)
+
+=head2 --timeout=#
+
+seconds until timeout (default: 300)
+
+=head2 --keepalive-timeout=#
+
+timeout for persistent connections (default: 2)
+
+=head2 --max-keepalive-reqs=#
+
+max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 1)
+
+=head2 --max-reqs-per-child=#
+
+max. number of requests to be handled before a worker process exits (default: 100)
+
+=head2 --min-reqs-per-child=#
+
+if set, randomizes the number of requests handled by a single worker process between the value and that supplied by C<--max-reqs-per-chlid> (default: none)
+
+=head1 SEE ALSO
+
+L<Starlet>, L<Server::Starter>, L<AnyEvent>
+
+=head1 LICENSE      
 
 Copyright (C) Masahiro Nagano
 

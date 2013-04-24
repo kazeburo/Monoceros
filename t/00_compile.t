@@ -2,7 +2,9 @@ use strict;
 use Test::More;
 
 use_ok $_ for qw(
-    Starcross
+    Monoceros
+    Monoceros::Server
+    Plack::Handler::Monoceros
 );
 
 done_testing;

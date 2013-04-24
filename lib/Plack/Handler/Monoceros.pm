@@ -1,8 +1,8 @@
-package Plack::Handler::Starcross;
+package Plack::Handler::Monoceros;
 
 use strict;
 use warnings;
-use base qw/Starcross::Server/;
+use base qw/Monoceros::Server/;
 
 1;
 
