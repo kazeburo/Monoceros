@@ -9,16 +9,14 @@ use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
 use AnyEvent::Handle;
-use AnyEvent::Util qw(fh_nonblocking guard);
+use AnyEvent::Util qw(fh_nonblocking);
+use Digest::MD5 qw/md5_hex/;
 use File::Temp;
-use Digest::MD5;
 
 use Carp ();
 use Plack::Util;
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
-use Fcntl qw(:flock);
-use Scalar::Util qw/refaddr/;
 
 use constant WRITER => 0;
 use constant READER => 1;
@@ -36,11 +34,21 @@ sub setup_sockpair {
         or die "failed to create socketpair: $!";
     my @pipe_worker = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
         or die "failed to create socketpair: $!";
-    my @pipe_info = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
-        or die "failed to create socketpair: $!";
     $self->{pipe_lstn} = \@pipe_lstn;
-    $self->{pipe_info} = \@pipe_info;
     $self->{pipe_worker} = \@pipe_worker; 
+
+    my ($fh, $filename) = File::Temp::tempfile(UNLINK => 0);
+    close($fh);
+    unlink($filename);
+    $self->{internal_sock_file} = $filename;
+
+    my $internal_sock = IO::Socket::UNIX->new(
+        Type  => SOCK_STREAM,
+        Local => $self->{internal_sock_file},
+        Listen => SOMAXCONN,
+    ) or die "cannot connect internal socket: $!";
+    $self->{internal_sock} = $internal_sock;
+
     1;
 }
 
@@ -76,7 +84,6 @@ sub queued_fdsend {
     
     $self->{fdsend_worker} ||= AE::io $self->{pipe_lstn}->[WRITER], 1, sub {
         do {
-            # send fh
             if ( ! IO::FDPass::send(fileno $self->{pipe_lstn}->[WRITER], fileno $self->{fdsend_queue}->[0]) ) {
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 undef $self->{fdsend_worker};
@@ -94,68 +101,79 @@ sub connection_manager {
     my ($self, $worker_pid) = @_;
     local $SIG{PIPE} = 'IGNORE';
 
-    fh_nonblocking $self->{listen_sock}, 1;
     $self->{pipe_lstn}->[READER]->close;
-    $self->{pipe_info}->[WRITER]->close;    
     $self->{pipe_worker}->[WRITER]->close;    
     fh_nonblocking $self->{pipe_lstn}->[WRITER], 1;
     fh_nonblocking $self->{pipe_worker}->[READER], 1;
-    fh_nonblocking $self->{pipe_info}->[READER], 1;
-    
-    my %master;
+    fh_nonblocking $self->{internal_sock}, 1;
+    fh_nonblocking $self->{listen_sock}, 1;
+
+    my %manager;
+    my %sockets;
     my $term_received = 0;
-    my $reqs = 0;
 
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
-        delete $master{server_io}; #stop new accept
+        delete $self->{listen_sock}; #stop new accept
         kill 'TERM', $worker_pid;
         $term_received++;
-        while ( $reqs ) {
+        while ( keys %sockets ) {
             #waiting
         }
         $cv->send;
     };
     my $sig2;$sig2 = AE::signal 'USR1', sub {
-        delete $master{server_io}; #stop new accept
+        delete $self->{listen_sock}; #stop new accept
         kill 'USR1', $worker_pid;
+        while ( keys %sockets ) {
+            #waiting
+        }
         $cv->send;
     };
 
-    my %sockets;
-    my $at; $at = AE::timer 0, 1, sub {
+    $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
         for my $key ( keys %sockets ) {
-            delete $sockets{$key} if $time - $sockets{$key}->[1] > $self->{keepalive_timeout};
+            delete $sockets{$key} if $sockets{$key}->[1] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout};
         }
     };
-    my $hd = new AnyEvent::Handle 
-        fh => $self->{pipe_info}->[READER];
-    $hd->on_read(sub {
-        shift->push_read( line => sub {
-            #warn "[clean]" . $_[1];
-            delete $sockets{$_[1]};
+
+    $manager{internal_listener} = AE::io $self->{internal_sock}, 0, sub {
+        my ($fh,$peer) = $self->{internal_sock}->accept;
+        return unless $fh;
+        my $internal;
+        $internal = new AnyEvent::Handle 
+            fh => $fh,
+            on_eof => sub { undef $internal };
+        $internal->on_read(sub{
+            my $handle = shift;
+            $handle->push_read( line => sub {
+                my ($method,$remote) = split / /, $_[1], 2;
+                if ( $method eq 'delete' ) {
+                    delete $sockets{$remote};
+                } elsif ( $method eq 'req_count' ) {
+                    $handle->push_write(sprintf('% 128s',$sockets{$remote}->[2]));
+                }
+            });
         });
-    });
+    };
     
-    $master{server_io} = AE::io $self->{listen_sock}, 0, sub {
+    $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
+        return unless $self->{listen_sock};
         my ($fh,$peer) = $self->{listen_sock}->accept;
         return unless $fh;
-        #warn "[manager]" . Digest::MD5::md5_hex($peer);
-        $sockets{Digest::MD5::md5_hex($peer)} = [$fh,time];
+        $sockets{md5_hex($peer)} = [$fh,time,0];
         fh_nonblocking $fh, 1
             or die "failed to set socket to nonblocking mode:$!";
         setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
             or die "setsockopt(TCP_NODELAY) failed:$!";
-        $reqs++;
         my $w; $w = AE::io $fh, 0, sub {
             $self->queued_fdsend($fh);
-            --$reqs;
             undef $w;
         };
     };
 
-    $master{pipe_io} = AE::io $self->{pipe_worker}->[READER], 0, sub {
+    $manager{worker_listener} = AE::io $self->{pipe_worker}->[READER], 0, sub {
         my $fd = IO::FDPass::recv(fileno $self->{pipe_worker}->[READER]);
         return if $fd < 0;
         my $conn = IO::Socket::INET->new_from_fd($fd,'r')
@@ -164,31 +182,32 @@ sub connection_manager {
             return;
         }
         my $remote = $conn->peername;
-        return unless $remote;
-        $sockets{Digest::MD5::md5_hex($remote)} = [$conn,time];
-        $reqs++;
+        return unless $remote; #??
+        $remote = md5_hex($remote);
+
+        my $keepalive_reqs = 0;
+        if ( exists $sockets{$remote} ) {
+            $keepalive_reqs = $sockets{$remote}->[2];
+            $keepalive_reqs++;
+        }
+
+        $sockets{$remote} = [$conn,time,$keepalive_reqs];
+
         my $w; $w = AE::io $conn, 0, sub {
             $self->queued_fdsend($conn);
-            --$reqs;
             undef $w;
         };
     };
     $cv->recv;
-    \%master;
 }
 
 sub request_worker {
     my ($self,$app) = @_;
 
-    delete $self->{lock_fh};
     $self->{listen_sock}->close;
     $self->{pipe_lstn}->[WRITER]->close;
     $self->{pipe_worker}->[READER]->close;
-    $self->{pipe_info}->[READER]->close;
-
-    my ($tmp_lock_fh, $lock_filename) = File::Temp::tempfile(UNLINK=>0);
-    close($tmp_lock_fh);
-    $self->{lock_filename} = $lock_filename;
+    $self->{internal_sock}->close;
 
     # use Parallel::Prefork
     my %pm_args = (
@@ -216,7 +235,6 @@ sub request_worker {
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
             my $proc_req_count = 0;
             $self->{can_exit} = 1;
-            #open(my $lock_fh, '>', $self->{lock_filename}) or die $!;
             
             local $SIG{TERM} = sub {
                 exit 0 if $self->{can_exit};
@@ -226,29 +244,36 @@ sub request_worker {
             };
             local $SIG{PIPE} = 'IGNORE';
             
+            my $internal_sock = IO::Socket::UNIX->new(
+                Peer => $self->{internal_sock_file}
+            ) or die "cannot connect internal socket: $!";
+ 
             while ( $proc_req_count < $max_reqs_per_child ) {
                 my @can_read = $select_pipe_read->can_read(1);
                 if ( !@can_read ) {
                     next;
                 }
-                #flock($lock_fh, LOCK_EX | LOCK_NB) or next;
+
                 my $fd = IO::FDPass::recv(fileno $self->{pipe_lstn}->[READER]);
                 die "couldnot read pipe: $!" if $fd < 0;
-                #flock($lock_fh, LOCK_UN);
                 
                 ++$proc_req_count;
                 my $conn = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
-                #warn "[child]" . Digest::MD5::md5_hex($conn->peername);
-                
-                my ($peerhost, $peerport) = ($conn->peerhost, $conn->peerport);
-                my $is_keepalive = 1;
-                
+                my $peername = $conn->peername;
+                next unless $peername; #??
+                my ($peerport,$peerhost) = unpack_sockaddr_in $peername;
+                my $remote = md5_hex($peername);
+                $internal_sock->syswrite("req_count $remote\n");
+                $internal_sock->sysread(my $req_count, 128);
+                $req_count++;
+                my $may_keepalive = $req_count < $self->{max_keepalive_reqs};
+
                 my $env = {
                     SERVER_PORT => $self->{port},
                     SERVER_NAME => $self->{host},
                     SCRIPT_NAME => '',
-                    REMOTE_ADDR => $peerhost,
+                    REMOTE_ADDR => inet_ntoa($peerhost),
                     REMOTE_PORT => $peerport,
                     'psgi.version' => [ 1, 1 ],
                     'psgi.errors'  => *STDERR,
@@ -262,21 +287,19 @@ sub request_worker {
                     'psgix.io'          => $conn,
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
-                my $keepalive = $self->handle_connection($env, $conn, $app, 1, $is_keepalive);
+                my $keepalive = $self->handle_connection($env, $conn, $app, $may_keepalive, $req_count != 1);
                 
                 if ( !$self->{term_received} && $keepalive ) {
                     IO::FDPass::send(fileno $self->{pipe_worker}->[WRITER], fileno $conn)
                             or die "unable to pass file handle: $!";
                 }
                 else {
-                    syswrite $self->{pipe_info}->[WRITER], Digest::MD5::md5_hex($conn->peername) . "\n";
+                    $internal_sock->syswrite("delete $remote\n");
                 }
             }
         });
     }
     $pm->wait_all_children;
-    unlink($self->{lock_filename});
-
 }
 
 
