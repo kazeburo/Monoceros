@@ -1,5 +1,5 @@
 {
-   "abstract" : "It's new $module",
+   "abstract" : "PSGI/Plack server with event driven connection manager, preforking workers",
    "author" : [
       "Masahiro Nagano <kazeburo@gmail.com>"
    ],
@@ -12,7 +12,7 @@
       "url" : "http://search.cpan.org/perldoc?CPAN::Meta::Spec",
       "version" : "2"
    },
-   "name" : "Starcross",
+   "name" : "Monoceros",
    "no_index" : {
       "directory" : [
          "t",
@@ -41,10 +41,14 @@
          }
       },
       "runtime" : {
+         "recommends" : {
+            "EV" : "4.15",
+            "HTTP::Parser::XS" : "0.16"
+         },
          "requires" : {
             "AnyEvent" : "7.04",
             "IO::FDPass" : "1.0",
-            "Plack" : "10023",
+            "Plack" : "1.0023",
             "Starlet" : "0.18",
             "perl" : "5.008005"
          }
@@ -58,13 +62,13 @@
    "release_status" : "unstable",
    "resources" : {
       "bugtracker" : {
-         "web" : "https://github.com/kazeburo/Starcross/issues"
+         "web" : "https://github.com/kazeburo/Monoceros/issues"
       },
-      "homepage" : "https://github.com/kazeburo/Starcross",
+      "homepage" : "https://github.com/kazeburo/Monoceros",
       "repository" : {
          "type" : "git",
-         "url" : "git://github.com/kazeburo/Starcross.git",
-         "web" : "https://github.com/kazeburo/Starcross"
+         "url" : "git://github.com/kazeburo/Monoceros.git",
+         "web" : "https://github.com/kazeburo/Monoceros"
       }
    },
    "version" : "0.01"

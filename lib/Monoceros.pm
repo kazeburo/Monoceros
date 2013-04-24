@@ -13,7 +13,7 @@ __END__
 
 =head1 NAME
 
-Monoceros - PSGI/Plack server with event drived connection manager, preforking workers
+Monoceros - PSGI/Plack server with event driven connection manager, preforking workers
 
 =head1 SYNOPSIS
 
