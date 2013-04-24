@@ -20,6 +20,14 @@ connection at minimal processes.
     <- keepalive ->              <-- passing fds -->  `---+ worker |
                                                           +--------+
 
+Features of Monoceros
+
+\- a manager process based on [AnyEvent](http://search.cpan.org/perldoc?AnyEvent) keeps over C10K connections
+
+\- uses [IO::FDPass](http://search.cpan.org/perldoc?IO::FDPass) for passing a file descriptor to workers
+
+\- supports HTTP/1.0 keepalive
+
 And this server inherit [Starlet](http://search.cpan.org/perldoc?Starlet). Monoceros supports following features too.
 
 \- prefork and graceful shutdown using [Parallel::Prefork](http://search.cpan.org/perldoc?Parallel::Prefork)
@@ -33,10 +41,11 @@ But Monoceros does not support spawn-interval.
 # COMMAND LINE OPTIONS
 
 In addition to the options supported by [plackup](http://search.cpan.org/perldoc?plackup), Monoceros accepts following options(s).
+Note, the default value of several options is different from Starlet.
 
 ## \--max-workers=\#
 
-number of worker processes (default: 10)
+number of worker processes (default: 5)
 
 ## \--timeout=\#
 
@@ -44,11 +53,11 @@ seconds until timeout (default: 300)
 
 ## \--keepalive-timeout=\#
 
-timeout for persistent connections (default: 2)
+timeout for persistent connections (default: 10)
 
 ## \--max-keepalive-reqs=\#
 
-max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 1)
+max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 100)
 
 ## \--max-reqs-per-child=\#
 
@@ -60,7 +69,7 @@ if set, randomizes the number of requests handled by a single worker process bet
 
 # SEE ALSO
 
-[Starlet](http://search.cpan.org/perldoc?Starlet), [Server::Starter](http://search.cpan.org/perldoc?Server::Starter), [AnyEvent](http://search.cpan.org/perldoc?AnyEvent)
+[Starlet](http://search.cpan.org/perldoc?Starlet), [Server::Starter](http://search.cpan.org/perldoc?Server::Starter), [AnyEvent](http://search.cpan.org/perldoc?AnyEvent), [IO::FDPass](http://search.cpan.org/perldoc?IO::FDPass)
 
 # LICENSE      
 

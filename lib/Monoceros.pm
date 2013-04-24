@@ -33,6 +33,14 @@ connection at minimal processes.
     <- keepalive ->              <-- passing fds -->  `---+ worker |
                                                           +--------+
 
+Features of Monoceros
+
+- a manager process based on L<AnyEvent> keeps over C10K connections
+
+- uses L<IO::FDPass> for passing a file descriptor to workers
+
+- supports HTTP/1.0 keepalive
+
 And this server inherit L<Starlet>. Monoceros supports following features too.
 
 - prefork and graceful shutdown using L<Parallel::Prefork>
@@ -46,10 +54,11 @@ But Monoceros does not support spawn-interval.
 =head1 COMMAND LINE OPTIONS
 
 In addition to the options supported by L<plackup>, Monoceros accepts following options(s).
+Note, the default value of several options is different from Starlet.
 
 =head2 --max-workers=#
 
-number of worker processes (default: 10)
+number of worker processes (default: 5)
 
 =head2 --timeout=#
 
@@ -57,11 +66,11 @@ seconds until timeout (default: 300)
 
 =head2 --keepalive-timeout=#
 
-timeout for persistent connections (default: 2)
+timeout for persistent connections (default: 10)
 
 =head2 --max-keepalive-reqs=#
 
-max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 1)
+max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 100)
 
 =head2 --max-reqs-per-child=#
 
@@ -73,7 +82,7 @@ if set, randomizes the number of requests handled by a single worker process bet
 
 =head1 SEE ALSO
 
-L<Starlet>, L<Server::Starter>, L<AnyEvent>
+L<Starlet>, L<Server::Starter>, L<AnyEvent>, L<IO::FDPass>
 
 =head1 LICENSE      
 

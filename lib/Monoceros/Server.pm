@@ -41,7 +41,7 @@ sub new {
         $listen_sock->fdopen($fd, 'w')
             or die "failed to bind to listening socket:$!";
     }
-    my $max_workers = 10;
+    my $max_workers = 5;
     for (qw(max_workers workers)) {
         $max_workers = delete $args{$_}
             if defined $args{$_};
@@ -52,7 +52,7 @@ sub new {
         port                 => $args{port} || 8080,
         max_workers          => $max_workers,
         timeout              => $args{timeout} || 300,
-        keepalive_timeout    => $args{keepalive_timeout} || 5,
+        keepalive_timeout    => $args{keepalive_timeout} || 10,
         max_keepalive_reqs   => $args{max_keepalive_reqs} || 100,
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
