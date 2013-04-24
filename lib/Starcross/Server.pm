@@ -165,11 +165,17 @@ sub connection_manager {
             or die "failed to set socket to nonblocking mode:$!";
         setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
             or die "setsockopt(TCP_NODELAY) failed:$!";
-        my $w; $w = AE::io $fh, 0, sub {
+        if ( $self->{_using_defer_accept} ) {
             $sockets{$remote}->[3] = 0; #no-idle
             $self->queued_fdsend($fh);
-            undef $w;
-        };
+        }
+        else {
+            my $w; $w = AE::io $fh, 0, sub {
+                $sockets{$remote}->[3] = 0; #no-idle
+                $self->queued_fdsend($fh);
+                undef $w;
+            };
+        }
     };
 
     $manager{worker_listener} = AE::io $self->{pipe_worker}->[READER], 0, sub {
