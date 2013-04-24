@@ -12,7 +12,7 @@ use AnyEvent::Handle;
 use AnyEvent::Util qw(fh_nonblocking);
 use Digest::MD5 qw/md5_hex/;
 use File::Temp;
-
+use Time::HiRes qw/time/;
 use Carp ();
 use Plack::Util;
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
