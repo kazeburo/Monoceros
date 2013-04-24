@@ -3,8 +3,8 @@ package Starcross::Server;
 use strict;
 use warnings;
 use base qw/Plack::Handler::Starlet/;
-use IO::Select;
 use IO::Socket;
+use IO::Select;
 use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
@@ -17,7 +17,7 @@ use Carp ();
 use Plack::Util;
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
-
+use List::Util qw/shuffle first/;
 use constant WRITER => 0;
 use constant READER => 1;
 
@@ -30,12 +30,17 @@ sub run {
 
 sub setup_sockpair {
     my $self = shift;
-    my @pipe_lstn = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
-        or die "failed to create socketpair: $!";
     my @pipe_worker = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
         or die "failed to create socketpair: $!";
-    $self->{pipe_lstn} = \@pipe_lstn;
     $self->{pipe_worker} = \@pipe_worker; 
+
+    my @lstn_pipes;
+    for (0..2) {
+        my @pipe_lstn = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
+            or die "failed to create socketpair: $!";
+        push @lstn_pipes, \@pipe_lstn;
+    }
+    $self->{lstn_pipes} = \@lstn_pipes;
 
     my ($fh, $filename) = File::Temp::tempfile(UNLINK => 0);
     close($fh);
@@ -77,21 +82,32 @@ sub run_workers {
 
 sub queued_fdsend {
     my $self = shift;
-    my $conn = shift;
+    my $info = shift;
 
-    $self->{fdsend_queue} ||= [];
-    push @{$self->{fdsend_queue}},  $conn;
-    
-    $self->{fdsend_worker} ||= AE::io $self->{pipe_lstn}->[WRITER], 1, sub {
+    my $pipe_n = 1;
+    if ( $info->[2] == 0 ) {
+        $pipe_n = 0;
+    }
+    elsif ( $info->[2] + 1 >= $self->{max_keepalive_reqs} ) {
+        $pipe_n = 2;
+    }
+    my $queue = "fdsend_queue_$pipe_n";
+    my $worker = "fdsend_worker_$pipe_n";
+
+    $info->[3] = 0; #no-idle
+
+    $self->{$queue} ||= [];
+    push @{$self->{$queue}},  $info;
+    $self->{$worker} ||= AE::io $self->{lstn_pipes}[$pipe_n][WRITER], 1, sub {
         do {
-            if ( ! IO::FDPass::send(fileno $self->{pipe_lstn}->[WRITER], fileno $self->{fdsend_queue}->[0]) ) {
+            if ( ! IO::FDPass::send(fileno $self->{lstn_pipes}[$pipe_n][WRITER], fileno $self->{$queue}[0][0] ) ) {
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                undef $self->{fdsend_worker};
+                undef $self->{$worker};
                 die "unable to pass file handle: $!"; 
             }
-            shift @{$self->{fdsend_queue}};
-        } while @{$self->{fdsend_queue}};
-        undef $self->{fdsend_worker};
+            shift @{$self->{$queue}};
+        } while @{$self->{$queue}};
+        undef $self->{$worker};
     };
 
     1;
@@ -100,9 +116,11 @@ sub queued_fdsend {
 sub connection_manager {
     my ($self, $worker_pid) = @_;
 
-    $self->{pipe_lstn}->[READER]->close;
+    for (0..2) {
+        $self->{lstn_pipes}[$_][READER]->close;
+        fh_nonblocking $self->{lstn_pipes}[$_][WRITER], 1;
+    }
     $self->{pipe_worker}->[WRITER]->close;    
-    fh_nonblocking $self->{pipe_lstn}->[WRITER], 1;
     fh_nonblocking $self->{pipe_worker}->[READER], 1;
     fh_nonblocking $self->{internal_sock}, 1;
     fh_nonblocking $self->{listen_sock}, 1;
@@ -149,7 +167,7 @@ sub connection_manager {
                     my $reqs = exists $sockets{$remote} ? $sockets{$remote}->[2] 
                                                         : $self->{max_reqs_per_child} + 1;
                     $reqs = $self->{max_reqs_per_child} + 1 if $term_received;
-                    $handle->push_write(sprintf('% 128s',$reqs));
+                    $handle->push_write(sprintf('% 64s',$reqs));
                 }
             });
         });
@@ -166,13 +184,11 @@ sub connection_manager {
         setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
             or die "setsockopt(TCP_NODELAY) failed:$!";
         if ( $self->{_using_defer_accept} ) {
-            $sockets{$remote}->[3] = 0; #no-idle
-            $self->queued_fdsend($fh);
+            $self->queued_fdsend($sockets{$remote});
         }
         else {
             my $w; $w = AE::io $fh, 0, sub {
-                $sockets{$remote}->[3] = 0; #no-idle
-                $self->queued_fdsend($fh);
+                $self->queued_fdsend($sockets{$remote});
                 undef $w;
             };
         }
@@ -196,8 +212,7 @@ sub connection_manager {
         $sockets{$remote} = [$conn,time,$keepalive_reqs,1];
 
         my $w; $w = AE::io $conn, 0, sub {
-            $sockets{$remote}->[3] = 0; #no-idle
-            $self->queued_fdsend($conn);
+            $self->queued_fdsend($sockets{$remote});
             undef $w;
         };
     };
@@ -209,9 +224,13 @@ sub request_worker {
     my ($self,$app) = @_;
 
     $self->{listen_sock}->close;
-    $self->{pipe_lstn}->[WRITER]->close;
     $self->{pipe_worker}->[READER]->close;
     $self->{internal_sock}->close;
+
+    for (0..2) {
+        $self->{lstn_pipes}[$_][WRITER]->close;
+        $self->{lstn_pipes}[$_][READER]->blocking(0);
+    }
 
     # use Parallel::Prefork
     my %pm_args = (
@@ -229,9 +248,11 @@ sub request_worker {
 
     while ($pm->signal_received !~ /^(TERM)$/) {
         $pm->start(sub {
-            my $select_pipe_read = IO::Select->new(
-                $self->{pipe_lstn}->[READER],
-            );
+            my $select_lstn_pipes = IO::Select->new();
+            for (0..2) {
+                $select_lstn_pipes->add($self->{lstn_pipes}[$_][READER]);
+            }
+
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
             my $proc_req_count = 0;
             $self->{can_exit} = 1;
@@ -249,14 +270,24 @@ sub request_worker {
             ) or die "cannot connect internal socket: $!";
  
             while ( $proc_req_count < $max_reqs_per_child ) {
-                my @can_read = $select_pipe_read->can_read(1);
+                my @can_read = $select_lstn_pipes->can_read(1);
                 if ( !@can_read ) {
                     next;
                 }
+                my $fd;
+                my $pipe_n;
+                for my $pipe_read ( shuffle @can_read ) {
+                    my $fd_recv = IO::FDPass::recv($pipe_read->fileno);
+                    if ( $fd_recv >= 0 ) {
+                        $fd = $fd_recv;
+                        $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } (0..2);
+                        last;
+                    }
+                    next if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
+                    die "couldnot read pipe: $!";
+                }
 
-                my $fd = IO::FDPass::recv(fileno $self->{pipe_lstn}->[READER]);
-                die "couldnot read pipe: $!" if $fd < 0;
-                
+                next unless defined $fd;
                 ++$proc_req_count;
                 my $conn = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
@@ -264,12 +295,6 @@ sub request_worker {
                 next unless $peername; #??
                 my ($peerport,$peerhost) = unpack_sockaddr_in $peername;
                 my $remote = md5_hex($peername);
-                
-                $internal_sock->syswrite("req $remote");
-                $internal_sock->sysread(my $req_count, 128);
-                #my $req_count = 0;
-                $req_count++;
-                my $may_keepalive = $req_count < $self->{max_keepalive_reqs};
 
                 my $env = {
                     SERVER_PORT => $self->{port},
@@ -289,7 +314,7 @@ sub request_worker {
                     'psgix.io'          => $conn,
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
-                my $keepalive = $self->handle_connection($env, $conn, $app, $may_keepalive, $req_count != 1);
+                my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != 2, $pipe_n == 0);
                 
                 if ( !$self->{term_received} && $keepalive ) {
                     IO::FDPass::send(fileno $self->{pipe_worker}->[WRITER], fileno $conn)
