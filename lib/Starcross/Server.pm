@@ -212,7 +212,7 @@ sub request_worker {
     while ($pm->signal_received !~ /^(TERM)$/) {
         $pm->start(sub {
             my $select_lstn_pipes = IO::Select->new();
-            for (0..2) {
+            for (qw/1 0 2/) {
                 $select_lstn_pipes->add($self->{lstn_pipes}[$_][READER]);
             }
 
