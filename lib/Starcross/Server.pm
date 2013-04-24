@@ -11,13 +11,13 @@ use AnyEvent;
 use AnyEvent::Handle;
 use AnyEvent::Util qw(fh_nonblocking);
 use Digest::MD5 qw/md5_hex/;
-use File::Temp;
 use Time::HiRes qw/time/;
 use Carp ();
 use Plack::Util;
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use List::Util qw/shuffle first/;
+
 use constant WRITER => 0;
 use constant READER => 1;
 
@@ -168,9 +168,9 @@ sub connection_manager {
                     delete $sockets{$remote};
                 } elsif ( $method eq 'kep' ) {
                     return unless exists $sockets{$remote};
-                    $sockets{$remote}->[1] = time;
-                    $sockets{$remote}->[2]++;
-                    $sockets{$remote}->[3] = 1;
+                    $sockets{$remote}->[1] = time; #time
+                    $sockets{$remote}->[2]++; #reqs
+                    $sockets{$remote}->[3] = 1; #idle
                     my $w; $w = AE::io $sockets{$remote}->[0], 0, sub {
                         $self->queued_fdsend($sockets{$remote});
                         undef $w;
@@ -239,7 +239,7 @@ sub request_worker {
                     my $fd_recv = IO::FDPass::recv($pipe_read->fileno);
                     if ( $fd_recv >= 0 ) {
                         $fd = $fd_recv;
-                        $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } (0..2);
+                        $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } qw(1 0 2);
                         last;
                     }
                     next if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
