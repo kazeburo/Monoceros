@@ -54,7 +54,7 @@ sub setup_sockpair {
 
 sub run_workers {
     my ($self,$app) = @_;
-    
+    local $SIG{PIPE} = 'IGNORE';    
     my $pid = fork;  
     my $blocker;
     if ( $pid ) {
@@ -99,7 +99,6 @@ sub queued_fdsend {
 
 sub connection_manager {
     my ($self, $worker_pid) = @_;
-    local $SIG{PIPE} = 'IGNORE';
 
     $self->{pipe_lstn}->[READER]->close;
     $self->{pipe_worker}->[WRITER]->close;    
@@ -115,26 +114,21 @@ sub connection_manager {
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
         delete $self->{listen_sock}; #stop new accept
-        kill 'TERM', $worker_pid;
         $term_received++;
-        while ( keys %sockets ) {
-            #waiting
-        }
-        $cv->send;
-    };
-    my $sig2;$sig2 = AE::signal 'USR1', sub {
-        delete $self->{listen_sock}; #stop new accept
-        kill 'USR1', $worker_pid;
-        while ( keys %sockets ) {
-            #waiting
-        }
+        my $t;$t = AE::timer 0, 1, sub {
+            return if keys %sockets;
+            undef $t;
+        };
+        kill 'TERM', $worker_pid;
         $cv->send;
     };
 
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
         for my $key ( keys %sockets ) {
-            delete $sockets{$key} if $sockets{$key}->[1] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout};
+            delete $sockets{$key} if 
+                $sockets{$key}->[3]   #idle
+             && $time - $sockets{$key}->[1] > $self->{keepalive_timeout};
         }
     };
 
@@ -152,7 +146,10 @@ sub connection_manager {
                 if ( $method eq 'del' ) {
                     delete $sockets{$remote};
                 } elsif ( $method eq 'req' ) {
-                    $handle->push_write(sprintf('% 128s',$sockets{$remote}->[2]));
+                    my $reqs = exists $sockets{$remote} ? $sockets{$remote}->[2] 
+                                                        : $self->{max_reqs_per_child} + 1;
+                    $reqs = $self->{max_reqs_per_child} + 1 if $term_received;
+                    $handle->push_write(sprintf('% 128s',$reqs));
                 }
             });
         });
@@ -162,12 +159,14 @@ sub connection_manager {
         return unless $self->{listen_sock};
         my ($fh,$peer) = $self->{listen_sock}->accept;
         return unless $fh;
-        $sockets{md5_hex($peer)} = [$fh,time,0];
+        my $remote = md5_hex($peer);
+        $sockets{$remote} = [$fh,time,0,1];  #fh,time,reqs,idle
         fh_nonblocking $fh, 1
             or die "failed to set socket to nonblocking mode:$!";
         setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
             or die "setsockopt(TCP_NODELAY) failed:$!";
         my $w; $w = AE::io $fh, 0, sub {
+            $sockets{$remote}->[3] = 0; #no-idle
             $self->queued_fdsend($fh);
             undef $w;
         };
@@ -178,9 +177,6 @@ sub connection_manager {
         return if $fd < 0;
         my $conn = IO::Socket::INET->new_from_fd($fd,'r')
             or die "unable to convert file descriptor to handle: $!";
-        if ( $term_received ) {
-            return;
-        }
         my $remote = $conn->peername;
         return unless $remote; #??
         $remote = md5_hex($remote);
@@ -191,14 +187,16 @@ sub connection_manager {
             $keepalive_reqs++;
         }
 
-        $sockets{$remote} = [$conn,time,$keepalive_reqs];
+        $sockets{$remote} = [$conn,time,$keepalive_reqs,1];
 
         my $w; $w = AE::io $conn, 0, sub {
+            $sockets{$remote}->[3] = 0; #no-idle
             $self->queued_fdsend($conn);
             undef $w;
         };
     };
     $cv->recv;
+    \%manager;
 }
 
 sub request_worker {
@@ -217,17 +215,13 @@ sub request_worker {
             HUP  => 'TERM',
         },
     );
-    if (defined $self->{spawn_interval}) {
-        $pm_args{trap_signals}{USR1} = [ 'TERM', $self->{spawn_interval} ];
-        $pm_args{spawn_interval} = $self->{spawn_interval};
-    }
     if (defined $self->{err_respawn_interval}) {
         $pm_args{err_respawn_interval} = $self->{err_respawn_interval};
     }
 
     my $pm = Parallel::Prefork->new(\%pm_args);
 
-    while ($pm->signal_received !~ /^(TERM|USR1)$/) {
+    while ($pm->signal_received !~ /^(TERM)$/) {
         $pm->start(sub {
             my $select_pipe_read = IO::Select->new(
                 $self->{pipe_lstn}->[READER],
@@ -264,8 +258,10 @@ sub request_worker {
                 next unless $peername; #??
                 my ($peerport,$peerhost) = unpack_sockaddr_in $peername;
                 my $remote = md5_hex($peername);
+                
                 $internal_sock->syswrite("req $remote");
                 $internal_sock->sysread(my $req_count, 128);
+                #my $req_count = 0;
                 $req_count++;
                 my $may_keepalive = $req_count < $self->{max_keepalive_reqs};
 
