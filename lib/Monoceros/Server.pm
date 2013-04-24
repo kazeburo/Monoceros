@@ -125,6 +125,9 @@ sub queued_fdsend {
     my $self = shift;
     my $info = shift;
 
+    my $peername = getpeername($info->[0]);
+    return unless $peername;
+
     my $pipe_n = 1;
     if ( $info->[2] == 0 ) {
         $pipe_n = 0;
@@ -168,6 +171,8 @@ sub connection_manager {
     my %manager;
     my %sockets;
     my $term_received = 0;
+    my %initial_read;
+    my %keepalive_read;
 
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
@@ -184,12 +189,22 @@ sub connection_manager {
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
         for my $key ( keys %sockets ) {
-            delete $sockets{$key} if 
-                $sockets{$key}->[3]   #idle
-             && $time - $sockets{$key}->[1] > $self->{keepalive_timeout};
+            if ( $sockets{$key}->[3] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
+                delete $sockets{$key};
+                delete $initial_read{$key};
+                delete $keepalive_read{$key};
+            }
         }
     };
+    #use Data::Dumper;
+    #    my $t;$t = AE::timer 0, 1, sub {
+    #        for my $key ( keys %sockets ) {
+    #           warn sprintf "==== remain %s", Dumper($sockets{$key})
+    #               if time - $sockets{$key}->[1] > 2;
+    #        }
+    #    };
     
+
     $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
         return unless $self->{listen_sock};
         my ($fh,$peer) = $self->{listen_sock}->accept;
@@ -204,9 +219,9 @@ sub connection_manager {
             $self->queued_fdsend($sockets{$remote});
         }
         else {
-            my $w; $w = AE::io $fh, 0, sub {
+            $initial_read{$remote} = AE::io $fh, 0, sub {
                 $self->queued_fdsend($sockets{$remote});
-                undef $w;
+                undef $initial_read{$remote};
             };
         }
     };
@@ -217,16 +232,17 @@ sub connection_manager {
             my $handle = shift;
             $handle->push_read( chunk => 36, sub {
                 my ($method,$remote) = split / /, $_[1], 2;
+                return unless exists $sockets{$remote};
                 if ( $method eq 'end' ) {
+                    $sockets{$remote}->[3] = 1; #idle
                     delete $sockets{$remote};
                 } elsif ( $method eq 'kep' ) {
-                    return unless exists $sockets{$remote};
                     $sockets{$remote}->[1] = time; #time
                     $sockets{$remote}->[2]++; #reqs
                     $sockets{$remote}->[3] = 1; #idle
-                    my $w; $w = AE::io $sockets{$remote}->[0], 0, sub {
+                    $keepalive_read{$remote} = AE::io $sockets{$remote}->[0], 0, sub {
                         $self->queued_fdsend($sockets{$remote});
-                        undef $w;
+                        undef $keepalive_read{$remote};
                     };
                 }
             });
@@ -337,6 +353,7 @@ sub request_worker {
         });
     }
     $pm->wait_all_children;
+    exit;
 }
 
 
