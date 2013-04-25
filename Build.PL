@@ -21,8 +21,8 @@ my $builder = Module::Build->new(
     },
 
     no_index    => { 'directory' => [ 'inc' ] },
-    name        => 'Monoceres',
-    module_name => 'Monoceres',
+    name        => 'Monoceros',
+    module_name => 'Monoceros',
 
     script_files => [glob('script/*'), glob('bin/*')],
 
