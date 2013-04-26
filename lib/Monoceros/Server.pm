@@ -315,7 +315,7 @@ sub request_worker {
                         last;
                     }
                     next if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                    die "couldnot read pipe: $!";
+                    #die "couldnot read pipe: $!";
                 }
 
                 next unless defined $fd;
