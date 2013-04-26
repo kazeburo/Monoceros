@@ -181,9 +181,9 @@ sub connection_manager {
 
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
-        delete $self->{listen_sock}; #stop new accept
+        #delete $self->{listen_sock}; #stop new accept
         $term_received++;
-        my $t;$t = AE::timer 0, 0.1, sub {
+        my $t;$t = AE::timer 0, 1, sub {
             return if keys %sockets;
             kill 'TERM', $worker_pid;
             undef $t;
@@ -209,7 +209,7 @@ sub connection_manager {
     };
     
     $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
-        return unless $self->{listen_sock};
+        return if $term_received;
         my ($fh,$peer) = $self->{listen_sock}->accept;
         return unless $fh;
         my $remote = md5_hex($peer);
@@ -229,28 +229,23 @@ sub connection_manager {
         }
     };
 
-    $manager{worker_listener} =  AnyEvent::Handle->new(
-        fh => $self->{worker_pipe}->[READER],
-        on_read => sub {
-            my $handle = shift;
-            $handle->push_read( chunk => 36, sub {
-                my ($method,$remote) = split / /, $_[1], 2;
-                return unless exists $sockets{$remote};
-                if ( $method eq 'end' ) {
-                    $sockets{$remote}->[S_IDLE] = 1; #idle
-                    delete $sockets{$remote};
-                } elsif ( $method eq 'kep' ) {
-                    $sockets{$remote}->[S_TIME] = time; #time
-                    $sockets{$remote}->[S_REQS]++; #reqs
-                    $sockets{$remote}->[S_IDLE] = 1; #idle
-                    $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
-                        $self->queued_fdsend($sockets{$remote});
-                        undef $wait_read{$remote};
-                    };
-                }
-            });
-        },
-    );
+    $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
+        my $len = $self->{worker_pipe}->[READER]->sysread(my $buf, 36);
+        my ($method,$remote) = split / /,$buf, 2;
+        return unless exists $sockets{$remote};
+        if ( $method eq 'end' ) {
+            $sockets{$remote}->[S_IDLE] = 1; #idle
+            delete $sockets{$remote};
+        } elsif ( $method eq 'kep' ) {
+            $sockets{$remote}->[S_TIME] = time; #time
+            $sockets{$remote}->[S_REQS]++; #reqs
+            $sockets{$remote}->[S_IDLE] = 1; #idle
+            $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
+                $self->queued_fdsend($sockets{$remote});
+                undef $wait_read{$remote};
+            };
+        }
+    };
 
     $cv->recv;
     \%manager;
@@ -326,7 +321,6 @@ sub request_worker {
                 next unless $peername; #??
                 my ($peerport,$peerhost) = unpack_sockaddr_in $peername;
                 my $remote = md5_hex($peername);
-
                 my $env = {
                     SERVER_PORT => $self->{port},
                     SERVER_NAME => $self->{host},
@@ -348,12 +342,12 @@ sub request_worker {
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive 
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
-                
                 my $method = 'end';
                 if ( !$self->{term_received} && $keepalive ) {
                     $method = 'kep';
                 }
-                $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
+                
+                my $len = $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
             }
         });
     }
