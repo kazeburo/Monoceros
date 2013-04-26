@@ -67,6 +67,14 @@ max. number of requests to be handled before a worker process exits (default: 10
 
 if set, randomizes the number of requests handled by a single worker process between the value and that supplied by `--max-reqs-per-chlid` (default: none)
 
+# RECOMMENDED MODULES
+
+For more performance. I recommends you to install these module.
+
+\- [EV](http://search.cpan.org/perldoc?EV)
+
+\- [HTTP::Parser::XS](http://search.cpan.org/perldoc?HTTP::Parser::XS)
+
 # SEE ALSO
 
 [Starlet](http://search.cpan.org/perldoc?Starlet), [Server::Starter](http://search.cpan.org/perldoc?Server::Starter), [AnyEvent](http://search.cpan.org/perldoc?AnyEvent), [IO::FDPass](http://search.cpan.org/perldoc?IO::FDPass)

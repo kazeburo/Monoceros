@@ -80,6 +80,14 @@ max. number of requests to be handled before a worker process exits (default: 10
 
 if set, randomizes the number of requests handled by a single worker process between the value and that supplied by C<--max-reqs-per-chlid> (default: none)
 
+=head1 RECOMMENDED MODULES
+
+For more performance. I recommends you to install these module.
+
+- L<EV>
+
+- L<HTTP::Parser::XS>
+
 =head1 SEE ALSO
 
 L<Starlet>, L<Server::Starter>, L<AnyEvent>, L<IO::FDPass>
