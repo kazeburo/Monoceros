@@ -41,16 +41,16 @@
          }
       },
       "runtime" : {
-         "recommends" : {
-            "EV" : "4.15",
-            "HTTP::Parser::XS" : "0.16"
-         },
          "requires" : {
             "AnyEvent" : "7.04",
             "IO::FDPass" : "1.0",
             "Plack" : "1.0023",
             "Starlet" : "0.18",
             "perl" : "5.008005"
+         },
+         "suggests" : {
+            "EV" : "4.15",
+            "HTTP::Parser::XS" : "0.16"
          }
       },
       "test" : {
