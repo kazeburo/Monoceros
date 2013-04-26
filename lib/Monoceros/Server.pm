@@ -21,6 +21,14 @@ use List::Util qw/shuffle first/;
 use constant WRITER => 0;
 use constant READER => 1;
 
+use constant S_SOCK => 0;
+use constant S_TIME => 1;
+use constant S_REQS => 2;
+use constant S_IDLE => 3;
+
+use constant KEEP_CONNECTION => 0;
+use constant CLOSE_CONNECTION => 1;
+
 sub new {
     my $class = shift;
     my %args = @_;
@@ -88,7 +96,7 @@ sub setup_sockpair {
     $self->{worker_pipe} = \@worker_pipe; 
 
     my @lstn_pipes;
-    for (0..2) {
+    for (0..1) {
         my @pipe_lstn = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
             or die "failed to create socketpair: $!";
         push @lstn_pipes, \@pipe_lstn;
@@ -125,26 +133,24 @@ sub queued_fdsend {
     my $self = shift;
     my $info = shift;
 
-    my $peername = getpeername($info->[0]);
-    return unless $peername;
-
-    my $pipe_n = 1;
-    if ( $info->[2] == 0 ) {
-        $pipe_n = 0;
-    }
-    elsif ( $info->[2] + 1 >= $self->{max_keepalive_reqs} ) {
-        $pipe_n = 2;
+    my $pipe_n = KEEP_CONNECTION;
+    if ( $info->[S_REQS] + 1 >= $self->{max_keepalive_reqs} ) {
+        $pipe_n = CLOSE_CONNECTION;
     }
     my $queue = "fdsend_queue_$pipe_n";
     my $worker = "fdsend_worker_$pipe_n";
 
-    $info->[3] = 0; #no-idle
+    $info->[S_IDLE] = 0; #no-idle
 
     $self->{$queue} ||= [];
     push @{$self->{$queue}},  $info;
     $self->{$worker} ||= AE::io $self->{lstn_pipes}[$pipe_n][WRITER], 1, sub {
         do {
-            if ( ! IO::FDPass::send(fileno $self->{lstn_pipes}[$pipe_n][WRITER], fileno $self->{$queue}[0][0] ) ) {
+            if ( !$self->{$queue}[0][S_SOCK] ) {
+                shift @{$self->{$queue}};
+                return;
+            }
+            if ( ! IO::FDPass::send(fileno $self->{lstn_pipes}[$pipe_n][WRITER], fileno $self->{$queue}[0][S_SOCK] ) ) {
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 undef $self->{$worker};
                 die "unable to pass file handle: $!"; 
@@ -160,7 +166,7 @@ sub queued_fdsend {
 sub connection_manager {
     my ($self, $worker_pid) = @_;
 
-    for (0..2) {
+    for (0..1) {
         $self->{lstn_pipes}[$_][READER]->close;
         fh_nonblocking $self->{lstn_pipes}[$_][WRITER], 1;
     }
@@ -171,8 +177,7 @@ sub connection_manager {
     my %manager;
     my %sockets;
     my $term_received = 0;
-    my %initial_read;
-    my %keepalive_read;
+    my %wait_read;
 
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
@@ -189,22 +194,20 @@ sub connection_manager {
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
         for my $key ( keys %sockets ) {
-            if ( $sockets{$key}->[3] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
+            if ( $sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{timeout} ) { #idle && timeout
+                delete $wait_read{$key};
                 delete $sockets{$key};
-                delete $initial_read{$key};
-                delete $keepalive_read{$key};
+            }
+            if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
+                # not idle && timeout
+                if ( ! $sockets{$key}->[S_SOCK]->connected() ) {
+                    delete $wait_read{$key};
+                    delete $sockets{$key};
+                }
             }
         }
     };
-    #use Data::Dumper;
-    #    my $t;$t = AE::timer 0, 1, sub {
-    #        for my $key ( keys %sockets ) {
-    #           warn sprintf "==== remain %s", Dumper($sockets{$key})
-    #               if time - $sockets{$key}->[1] > 2;
-    #        }
-    #    };
     
-
     $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
         return unless $self->{listen_sock};
         my ($fh,$peer) = $self->{listen_sock}->accept;
@@ -219,9 +222,9 @@ sub connection_manager {
             $self->queued_fdsend($sockets{$remote});
         }
         else {
-            $initial_read{$remote} = AE::io $fh, 0, sub {
+            $wait_read{$remote} = AE::io $fh, 0, sub {
                 $self->queued_fdsend($sockets{$remote});
-                undef $initial_read{$remote};
+                undef $wait_read{$remote};
             };
         }
     };
@@ -234,15 +237,15 @@ sub connection_manager {
                 my ($method,$remote) = split / /, $_[1], 2;
                 return unless exists $sockets{$remote};
                 if ( $method eq 'end' ) {
-                    $sockets{$remote}->[3] = 1; #idle
+                    $sockets{$remote}->[S_IDLE] = 1; #idle
                     delete $sockets{$remote};
                 } elsif ( $method eq 'kep' ) {
-                    $sockets{$remote}->[1] = time; #time
-                    $sockets{$remote}->[2]++; #reqs
-                    $sockets{$remote}->[3] = 1; #idle
-                    $keepalive_read{$remote} = AE::io $sockets{$remote}->[0], 0, sub {
+                    $sockets{$remote}->[S_TIME] = time; #time
+                    $sockets{$remote}->[S_REQS]++; #reqs
+                    $sockets{$remote}->[S_IDLE] = 1; #idle
+                    $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
                         $self->queued_fdsend($sockets{$remote});
-                        undef $keepalive_read{$remote};
+                        undef $wait_read{$remote};
                     };
                 }
             });
@@ -259,7 +262,7 @@ sub request_worker {
     $self->{listen_sock}->close;
     $self->{worker_pipe}->[READER]->close;
 
-    for (0..2) {
+    for (0..1) {
         $self->{lstn_pipes}[$_][WRITER]->close;
         $self->{lstn_pipes}[$_][READER]->blocking(0);
     }
@@ -281,7 +284,7 @@ sub request_worker {
     while ($pm->signal_received !~ /^(TERM)$/) {
         $pm->start(sub {
             my $select_lstn_pipes = IO::Select->new();
-            for (qw/1 0 2/) {
+            for (0..1) {
                 $select_lstn_pipes->add($self->{lstn_pipes}[$_][READER]);
             }
 
@@ -304,11 +307,11 @@ sub request_worker {
                 }
                 my $fd;
                 my $pipe_n;
-                for my $pipe_read ( shuffle @can_read ) {
+                for my $pipe_read ( @can_read ) {
                     my $fd_recv = IO::FDPass::recv($pipe_read->fileno);
                     if ( $fd_recv >= 0 ) {
                         $fd = $fd_recv;
-                        $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } qw(1 0 2);
+                        $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
                         last;
                     }
                     next if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
@@ -342,7 +345,9 @@ sub request_worker {
                     'psgix.io'          => $conn,
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
-                my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != 2, $pipe_n == 0);
+                my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
+                                      #  treat every connection as keepalive 
+                my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
                 
                 my $method = 'end';
                 if ( !$self->{term_received} && $keepalive ) {
