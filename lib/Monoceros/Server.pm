@@ -183,12 +183,12 @@ sub connection_manager {
     my $sig;$sig = AE::signal 'TERM', sub {
         delete $self->{listen_sock}; #stop new accept
         $term_received++;
-        my $t;$t = AE::timer 0, 1, sub {
+        my $t;$t = AE::timer 0, 0.1, sub {
             return if keys %sockets;
+            kill 'TERM', $worker_pid;
             undef $t;
+            $cv->send;
         };
-        kill 'TERM', $worker_pid;
-        $cv->send;
     };
 
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {

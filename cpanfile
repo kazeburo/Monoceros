@@ -1,5 +1,8 @@
 on test => sub {
-    requires 'Test::More', 0.98;
+    requires 'Test::More', '0.98';
+    requires 'Test::TCP', '1.26';
+    requires 'LWP::UserAgent';
+    requires 'Plack::Test::Suite';
 };
 
 requires 'Starlet' => '0.18';
