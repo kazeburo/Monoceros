@@ -295,7 +295,7 @@ sub request_worker {
             local $SIG{TERM} = sub {
                 exit 0 if $self->{can_exit};
                 $self->{term_received}++;
-                exit 0 if  $self->{term_received} > 1;
+                exit 0 if $self->{term_received} > 1;
                 
             };
             local $SIG{PIPE} = 'IGNORE';
@@ -314,7 +314,7 @@ sub request_worker {
                         $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
                         last;
                     }
-                    next if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
+                    #next if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                     #die "couldnot read pipe: $!";
                 }
 
