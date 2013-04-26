@@ -55,7 +55,10 @@
       },
       "test" : {
          "requires" : {
-            "Test::More" : "0.98"
+            "LWP::UserAgent" : "0",
+            "Plack::Test::Suite" : "0",
+            "Test::More" : "0.98",
+            "Test::TCP" : "1.26"
          }
       }
    },
