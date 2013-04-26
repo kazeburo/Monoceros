@@ -1,7 +1,7 @@
 use strict;
 use warnings;
 
-use PLack::Handler::Monoceros;
+use Plack::Handler::Monoceros;
 use Plack::Loader;
 use LWP::UserAgent;
 use Test::TCP;
