@@ -17,6 +17,8 @@ use Plack::Util;
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use List::Util qw/shuffle first/;
+use Fcntl qw(:flock);
+use File::Temp qw/tempfile/;
 
 use constant WRITER => 0;
 use constant READER => 1;
@@ -230,7 +232,9 @@ sub connection_manager {
     };
 
     $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
-        my $len = $self->{worker_pipe}->[READER]->sysread(my $buf, 36);
+        while (1) {
+        my $len = $self->{worker_pipe}->[READER]->recv(my $buf, 36);
+        last if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
         my ($method,$remote) = split / /,$buf, 2;
         return unless exists $sockets{$remote};
         if ( $method eq 'end' ) {
@@ -240,10 +244,12 @@ sub connection_manager {
             $sockets{$remote}->[S_TIME] = time; #time
             $sockets{$remote}->[S_REQS]++; #reqs
             $sockets{$remote}->[S_IDLE] = 1; #idle
-            $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
-                $self->queued_fdsend($sockets{$remote});
+            $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
+                $self->queued_fdsend($sockets{$remote}) 
+                    if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
                 undef $wait_read{$remote};
             };
+        }
         }
     };
 
@@ -294,7 +300,7 @@ sub request_worker {
                 
             };
             local $SIG{PIPE} = 'IGNORE';
-             
+            #open my $fh, ">", "/tmp/hoge.lock";
             while ( $proc_req_count < $max_reqs_per_child ) {
                 my @can_read = $select_lstn_pipes->can_read(1);
                 if ( !@can_read ) {
@@ -303,7 +309,9 @@ sub request_worker {
                 my $fd;
                 my $pipe_n;
                 for my $pipe_read ( @can_read ) {
+                    #flock $fh, LOCK_EX|LOCK_NB or next;
                     my $fd_recv = IO::FDPass::recv($pipe_read->fileno);
+                    #flock $fh, LOCK_UN;
                     if ( $fd_recv >= 0 ) {
                         $fd = $fd_recv;
                         $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
@@ -314,11 +322,12 @@ sub request_worker {
                 }
 
                 next unless defined $fd;
-                ++$proc_req_count;
                 my $conn = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
                 my $peername = $conn->peername;
                 next unless $peername; #??
+
+                ++$proc_req_count;
                 my ($peerport,$peerhost) = unpack_sockaddr_in $peername;
                 my $remote = md5_hex($peername);
                 my $env = {
@@ -347,7 +356,7 @@ sub request_worker {
                     $method = 'kep';
                 }
                 
-                my $len = $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
+                my $len = $self->{worker_pipe}->[WRITER]->send("$method $remote");
             }
         });
     }
