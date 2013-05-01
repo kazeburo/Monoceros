@@ -233,7 +233,7 @@ sub connection_manager {
 
     $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
         while (1) {
-            my $len = $self->{worker_pipe}->[READER]->recv(my $buf, 36);
+            my $len = $self->{worker_pipe}->[READER]->sysread(my $buf, 36);
             last if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
             my ($method,$remote) = split / /,$buf, 2;
             return unless exists $sockets{$remote};
@@ -353,7 +353,7 @@ sub request_worker {
                     $method = 'kep';
                 }
                 
-                my $len = $self->{worker_pipe}->[WRITER]->send("$method $remote");
+                my $len = $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
             }
         });
     }
