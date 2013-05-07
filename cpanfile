@@ -12,6 +12,8 @@ requires 'Plack' => '1.0023';
 
 suggests 'EV' => '4.15';
 suggests 'HTTP::Parser::XS' => '0.16';
+suggests 'Guard' => '1.022';
+
 
 
 
