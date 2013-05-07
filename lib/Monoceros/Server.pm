@@ -230,6 +230,7 @@ sub connection_manager {
 
     my $pipe_buf = '';
     $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
+        my @keep;
         PIPE_READ: while (1) {
             my $len = $self->{worker_pipe}->[READER]->sysread($pipe_buf, 10240);
             last PIPE_READ if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
@@ -241,18 +242,24 @@ sub connection_manager {
                     $sockets{$remote}->[S_IDLE] = 1; #idle
                     delete $sockets{$remote};
                 } elsif ( $method eq 'keep') {
-                    $sockets{$remote}->[S_TIME] = time; #time
-                    $sockets{$remote}->[S_REQS]++; #reqs
-                    $sockets{$remote}->[S_IDLE] = 1; #idle
-                    $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
-                        undef $wait_read{$remote};
-                        $self->queued_fdsend($sockets{$remote}) 
-                            if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
-                    };
+                    push @keep, $remote;
                 }
                 last BUF_READ if length $pipe_buf < 37;
             }
         }
+
+        my $time = time;
+        for my $remote ( @keep ) {
+            $sockets{$remote}->[S_TIME] = $time; #time
+            $sockets{$remote}->[S_REQS]++; #reqs
+            $sockets{$remote}->[S_IDLE] = 1; #idle
+            $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
+                undef $wait_read{$remote};
+                $self->queued_fdsend($sockets{$remote}) 
+                    if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
+            };
+        }
+
     };
 
     $cv->recv;
