@@ -222,8 +222,8 @@ sub connection_manager {
         }
         else {
             $wait_read{$remote} = AE::io $fh, 0, sub {
-                $self->queued_fdsend($sockets{$remote});
                 undef $wait_read{$remote};
+                $self->queued_fdsend($sockets{$remote});
             };
         }
     };
@@ -237,20 +237,16 @@ sub connection_manager {
             if ( $method eq 'exit' ) {
                 $sockets{$remote}->[S_IDLE] = 1; #idle
                 delete $sockets{$remote};
-            } elsif ( $method eq 'wait' || $method eq 'next') {
+            } elsif ( $method eq 'keep') {
                 $sockets{$remote}->[S_TIME] = time; #time
                 $sockets{$remote}->[S_REQS]++; #reqs
                 $sockets{$remote}->[S_IDLE] = 1; #idle
-                if ( $method eq 'next' ) {
-                    $self->queued_fdsend($sockets{$remote});
-                }
-                else {
-                    $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
-                        $self->queued_fdsend($sockets{$remote}) 
-                            if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
-                        undef $wait_read{$remote};
-                    };
-                }
+                $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
+                    undef $wait_read{$remote};
+                    $self->queued_fdsend($sockets{$remote}) 
+                        if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
+                    
+                };
             }
         }
     };
@@ -352,16 +348,7 @@ sub request_worker {
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
                 my $method = 'exit';
                 if ( !$self->{term_received} && $keepalive ) {
-                    my $efd = '';
-                    vec($efd, $conn->fileno, 1) = 1;
-                    my ($rfd, $wfd) = ($efd, '');
-                    my $nfound =  select($rfd, $wfd, $efd, 0); #nonblocking
-                    if ( $nfound )  {
-                        $method = 'next';
-                    }
-                    else {
-                        $method = 'wait';
-                    }
+                    $method = 'keep';
                 }
                 my $len = $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
             }
