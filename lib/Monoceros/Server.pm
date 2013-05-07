@@ -8,7 +8,6 @@ use IO::Select;
 use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
-use AnyEvent::Handle;
 use AnyEvent::Util qw(fh_nonblocking);
 use Digest::MD5 qw/md5_hex/;
 use Time::HiRes qw/time/;
@@ -16,9 +15,7 @@ use Carp ();
 use Plack::Util;
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
-use List::Util qw/shuffle first/;
-use Fcntl qw(:flock);
-use File::Temp qw/tempfile/;
+use List::Util qw/first/;
 
 use constant WRITER => 0;
 use constant READER => 1;
@@ -233,22 +230,27 @@ sub connection_manager {
 
     $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
         while (1) {
-            my $len = $self->{worker_pipe}->[READER]->sysread(my $buf, 36);
+            my $len = $self->{worker_pipe}->[READER]->sysread(my $buf, 37);
             last if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
             my ($method,$remote) = split / /,$buf, 2;
             return unless exists $sockets{$remote};
-            if ( $method eq 'end' ) {
+            if ( $method eq 'exit' ) {
                 $sockets{$remote}->[S_IDLE] = 1; #idle
                 delete $sockets{$remote};
-            } elsif ( $method eq 'kep' ) {
+            } elsif ( $method eq 'wait' || $method eq 'next') {
                 $sockets{$remote}->[S_TIME] = time; #time
                 $sockets{$remote}->[S_REQS]++; #reqs
                 $sockets{$remote}->[S_IDLE] = 1; #idle
-                $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
-                    $self->queued_fdsend($sockets{$remote}) 
-                        if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
-                    undef $wait_read{$remote};
-                };
+                if ( $method eq 'next' ) {
+                    $self->queued_fdsend($sockets{$remote});
+                }
+                else {
+                    $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
+                        $self->queued_fdsend($sockets{$remote}) 
+                            if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
+                        undef $wait_read{$remote};
+                    };
+                }
             }
         }
     };
@@ -348,11 +350,19 @@ sub request_worker {
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive 
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
-                my $method = 'end';
+                my $method = 'exit';
                 if ( !$self->{term_received} && $keepalive ) {
-                    $method = 'kep';
+                    my $efd = '';
+                    vec($efd, $conn->fileno, 1) = 1;
+                    my ($rfd, $wfd) = ($efd, '');
+                    my $nfound =  select($rfd, $wfd, $efd, 0); #nonblocking
+                    if ( $nfound )  {
+                        $method = 'next';
+                    }
+                    else {
+                        $method = 'wait';
+                    }
                 }
-                
                 my $len = $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
             }
         });
