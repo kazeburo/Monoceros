@@ -4,7 +4,7 @@
       "Masahiro Nagano <kazeburo@gmail.com>"
    ],
    "dynamic_config" : 0,
-   "generated_by" : "Minilla/v0.0.56, CPAN::Meta::Converter version 2.130880",
+   "generated_by" : "Minilla/v0.4.0, CPAN::Meta::Converter version 2.130880",
    "license" : [
       "perl_5"
    ],
@@ -37,7 +37,7 @@
             "Test::CPAN::Meta" : "0",
             "Test::MinimumVersion" : "0.10108",
             "Test::Pod" : "1.41",
-            "Test::Spellunker" : "v0.0.16"
+            "Test::Spellunker" : "v0.2.2"
          }
       },
       "runtime" : {
@@ -50,6 +50,7 @@
          },
          "suggests" : {
             "EV" : "4.15",
+            "Guard" : "1.022",
             "HTTP::Parser::XS" : "0.16"
          }
       },
