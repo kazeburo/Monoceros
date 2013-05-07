@@ -197,7 +197,7 @@ sub connection_manager {
                 delete $wait_read{$key};
                 delete $sockets{$key};
             }
-            if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
+            elsif ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
                 # not idle && timeout
                 if ( !$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected() ) {
                     delete $wait_read{$key};
@@ -231,7 +231,7 @@ sub connection_manager {
     my $pipe_buf = '';
     $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
         my @keep;
-        PIPE_READ: while (1) {
+        PIPE_READ: for (1..$self->{max_workers}) {
             my $len = $self->{worker_pipe}->[READER]->sysread($pipe_buf, 10240);
             last PIPE_READ if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
             BUF_READ: while ( length $pipe_buf ) {
