@@ -228,25 +228,29 @@ sub connection_manager {
         }
     };
 
+    my $pipe_buf = '';
     $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
-        while (1) {
-            my $len = $self->{worker_pipe}->[READER]->sysread(my $buf, 37);
-            last if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-            my ($method,$remote) = split / /,$buf, 2;
-            return unless exists $sockets{$remote};
-            if ( $method eq 'exit' ) {
-                $sockets{$remote}->[S_IDLE] = 1; #idle
-                delete $sockets{$remote};
-            } elsif ( $method eq 'keep') {
-                $sockets{$remote}->[S_TIME] = time; #time
-                $sockets{$remote}->[S_REQS]++; #reqs
-                $sockets{$remote}->[S_IDLE] = 1; #idle
-                $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
-                    undef $wait_read{$remote};
-                    $self->queued_fdsend($sockets{$remote}) 
-                        if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
-                    
-                };
+        PIPE_READ: while (1) {
+            my $len = $self->{worker_pipe}->[READER]->sysread($pipe_buf, 10240);
+            last PIPE_READ if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
+            BUF_READ: while ( length $pipe_buf ) {
+                my $string = substr $pipe_buf, 0, 37, '';
+                my ($method,$remote) = split / /,$string, 2;
+                next BUF_READ unless exists $sockets{$remote};
+                if ( $method eq 'exit' ) {
+                    $sockets{$remote}->[S_IDLE] = 1; #idle
+                    delete $sockets{$remote};
+                } elsif ( $method eq 'keep') {
+                    $sockets{$remote}->[S_TIME] = time; #time
+                    $sockets{$remote}->[S_REQS]++; #reqs
+                    $sockets{$remote}->[S_IDLE] = 1; #idle
+                    $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {                
+                        undef $wait_read{$remote};
+                        $self->queued_fdsend($sockets{$remote}) 
+                            if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
+                    };
+                }
+                last BUF_READ if length $pipe_buf < 37;
             }
         }
     };
