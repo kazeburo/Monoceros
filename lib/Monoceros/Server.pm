@@ -423,6 +423,7 @@ sub request_worker {
                     }
                 }
                 else {
+                    delete $keep_conn{$remote};
                     my $method = 'exit';
                     if ( !$self->{term_received} && $keepalive ) {
                         $method = 'keep';
