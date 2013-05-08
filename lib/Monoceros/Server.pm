@@ -94,6 +94,10 @@ sub setup_sockpair {
         or die "failed to create socketpair: $!";
     $self->{worker_pipe} = \@worker_pipe; 
 
+    my @defer_pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
+        or die "failed to create socketpair: $!";
+    $self->{defer_pipe} = \@worker_pipe; 
+
     my @lstn_pipes;
     for (0..1) {
         my @pipe_lstn = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
@@ -169,8 +173,10 @@ sub connection_manager {
         $self->{lstn_pipes}[$_][READER]->close;
         fh_nonblocking $self->{lstn_pipes}[$_][WRITER], 1;
     }
-    $self->{worker_pipe}->[WRITER]->close;    
+    $self->{worker_pipe}->[WRITER]->close;
     fh_nonblocking $self->{worker_pipe}->[READER], 1;
+    $self->{defer_pipe}->[WRITER]->close;
+    fh_nonblocking $self->{defer_pipe}->[READER], 1;
     fh_nonblocking $self->{listen_sock}, 1;
 
     my %manager;
@@ -180,7 +186,6 @@ sub connection_manager {
 
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
-        #delete $self->{listen_sock}; #stop new accept
         $term_received++;
         my $t;$t = AE::timer 0, 1, sub {
             return if keys %sockets;
@@ -207,28 +212,52 @@ sub connection_manager {
         }
     };
     
-    $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
-        return if $term_received;
-        my ($fh,$peer) = $self->{listen_sock}->accept;
-        return unless $fh;
-        my $remote = md5_hex($peer);
-        $sockets{$remote} = [$fh,time,0,1];  #fh,time,reqs,idle
-        fh_nonblocking $fh, 1
-            or die "failed to set socket to nonblocking mode:$!";
-        setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
-            or die "setsockopt(TCP_NODELAY) failed:$!";
-        if ( $self->{_using_defer_accept} ) {
-            $self->queued_fdsend($sockets{$remote});
-        }
-        else {
-            $wait_read{$remote} = AE::io $fh, 0, sub {
-                undef $wait_read{$remote};
-                $self->queued_fdsend($sockets{$remote});
-            };
-        }
-    };
-
-    my $pipe_buf = '';
+    if ( $self->{_using_defer_accept} ) {
+        $manager{defer_listener} = AE::io $self->{defer_pipe}->[READER], 0, sub {
+            my @fd;
+            D_PIPE_READ: for (1..$self->{max_workers}) {
+                my $fd = IO::FDPass::recv($self->{defer_pipe}->[READER]->fileno);
+                last D_PIPE_READ if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
+                next if $fd < 0;
+                push @fd, $fd;
+            }
+            for my $fd ( @fd ) {
+                my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
+                    or die "unable to convert file descriptor to handle: $!";
+                my $peername = $fh->peername;
+                next unless $peername;
+                my $remote = md5_hex($peername);
+                $sockets{$remote} = [$fh,time,1,1];  #fh,time,reqs,idle
+                $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
+                    undef $wait_read{$remote};
+                    $self->queued_fdsend($sockets{$remote})
+                        if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
+                };
+            }
+        };
+    }
+    else {
+        $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
+            return if $term_received;
+            L_SOCK_READ: for (1..$self->{max_workers}) {
+                my ($fh,$peer) = $self->{listen_sock}->accept;
+                last L_SOCK_READ if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
+                next unless $fh;
+                my $remote = md5_hex($peer);
+                $sockets{$remote} = [$fh,time,0,1];  #fh,time,reqs,idle
+                fh_nonblocking $fh, 1
+                    or die "failed to set socket to nonblocking mode:$!";
+                setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
+                    or die "setsockopt(TCP_NODELAY) failed:$!";
+                $wait_read{$remote} = AE::io $fh, 0, sub {
+                    undef $wait_read{$remote};
+                    $self->queued_fdsend($sockets{$remote});
+                };
+            }
+        };
+    }
+ 
+   my $pipe_buf = '';
     $manager{worker_listener} = AE::io $self->{worker_pipe}->[READER], 0, sub {
         my @keep;
         PIPE_READ: for (1..$self->{max_workers}) {
@@ -269,8 +298,15 @@ sub connection_manager {
 sub request_worker {
     my ($self,$app) = @_;
 
-    $self->{listen_sock}->close;
+    if ( $self->{_using_defer_accept} ) {
+        $self->{listen_sock}->blocking(0);
+    }
+    else {
+        $self->{listen_sock}->close;
+    }
+
     $self->{worker_pipe}->[READER]->close;
+    $self->{defer_pipe}->[READER]->close;
 
     for (0..1) {
         $self->{lstn_pipes}[$_][WRITER]->close;
@@ -293,9 +329,12 @@ sub request_worker {
 
     while ($pm->signal_received !~ /^(TERM)$/) {
         $pm->start(sub {
-            my $select_lstn_pipes = IO::Select->new();
+            my $select = IO::Select->new();
             for (0..1) {
-                $select_lstn_pipes->add($self->{lstn_pipes}[$_][READER]);
+                $select->add($self->{lstn_pipes}[$_][READER]);
+            }
+            if ( $self->{_using_defer_accept} ) {
+                $select->add($self->{listen_sock});
             }
 
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
@@ -310,27 +349,38 @@ sub request_worker {
             };
             local $SIG{PIPE} = 'IGNORE';
             while ( $proc_req_count < $max_reqs_per_child ) {
-                my @can_read = $select_lstn_pipes->can_read(1);
+                my @can_read = $select->can_read(1);
                 if ( !@can_read ) {
                     next;
                 }
-                my $fd;
+
+                my $conn;
+                my $peername;
                 my $pipe_n;
-                for my $pipe_read ( @can_read ) {
-                    my $fd_recv = IO::FDPass::recv($pipe_read->fileno);
-                    if ( $fd_recv >= 0 ) {
-                        $fd = $fd_recv;
-                        $pipe_n = first { $pipe_read eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
-                        last;
+                for my $pipe_or_sock ( @can_read ) {
+                    if ( $self->{_using_defer_accept} && $pipe_or_sock eq $self->{listen_sock} ) {
+                        my ($fh,$peer) = $self->{listen_sock}->accept;
+                        next unless $fh;
+                        $fh->blocking(1);
+                        setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
+                            or die "setsockopt(TCP_NODELAY) failed:$!";
+                        $conn = $fh;
+                        $peername = $peer;
+                        $pipe_n = KEEP_CONNECTION;
                     }
-                    #next if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                    #die "couldnot read pipe: $!";
+                    else {
+                        my $fd = IO::FDPass::recv($pipe_or_sock->fileno);
+                        if ( $fd >= 0 ) {
+                            $pipe_n = first { $pipe_or_sock eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
+                            $conn = IO::Socket::INET->new_from_fd($fd,'r+')
+                                or die "unable to convert file descriptor to handle: $!";
+                            $peername = $conn->peername;
+                            last;
+                        }
+                    }
                 }
 
-                next unless defined $fd;
-                my $conn = IO::Socket::INET->new_from_fd($fd,'r+')
-                    or die "unable to convert file descriptor to handle: $!";
-                my $peername = $conn->peername;
+                next unless $conn;
                 next unless $peername; #??
 
                 ++$proc_req_count;
@@ -357,11 +407,17 @@ sub request_worker {
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive 
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
-                my $method = 'exit';
-                if ( !$self->{term_received} && $keepalive ) {
-                    $method = 'keep';
+
+                if ( $self->{_using_defer_accept} && !$self->{term_received} && $keepalive ) {
+                    IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
                 }
-                my $len = $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
+                else {
+                    my $method = 'exit';
+                    if ( !$self->{term_received} && $keepalive ) {
+                        $method = 'keep';
+                    }
+                    $self->{worker_pipe}->[WRITER]->syswrite("$method $remote");
+                }
             }
         });
     }
