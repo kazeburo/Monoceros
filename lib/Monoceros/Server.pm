@@ -362,7 +362,7 @@ sub request_worker {
                     if ( $self->{_using_defer_accept} && $pipe_or_sock eq $self->{listen_sock} ) {
                         my ($fh,$peer) = $self->{listen_sock}->accept;
                         next unless $fh;
-                        $fh->blocking(1);
+                        $fh->blocking(0);
                         setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                             or die "setsockopt(TCP_NODELAY) failed:$!";
                         $conn = $fh;
