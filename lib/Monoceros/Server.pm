@@ -375,6 +375,7 @@ sub request_worker {
                         $peername = $peer;
                         $pipe_n = KEEP_CONNECTION;
                         $accept_direct = 1;
+                        last;
                     }
                     else {
                         my $fd = IO::FDPass::recv($pipe_or_sock->fileno);
@@ -417,7 +418,7 @@ sub request_worker {
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
 
                 if ( $accept_direct ) {
-                    if ( $self->{term_received} && $keepalive ) {
+                    if ( !$self->{term_received} && $keepalive ) {
                         IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
                         $keep_conn{$remote} = [$conn,time];
                     }
