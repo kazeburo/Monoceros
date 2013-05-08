@@ -348,7 +348,13 @@ sub request_worker {
                 
             };
             local $SIG{PIPE} = 'IGNORE';
+            my %keep_conn;
             while ( $proc_req_count < $max_reqs_per_child ) {
+                my $time = time;
+                for my $key (keys %keep_conn) {
+                    delete $keep_conn{$key} if $time - $keep_conn{$key}->[1] > $self->{keepalive_timeout};
+                }
+
                 my @can_read = $select->can_read(1);
                 if ( !@can_read ) {
                     next;
@@ -411,8 +417,10 @@ sub request_worker {
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
 
                 if ( $accept_direct ) {
-                    IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno)
-                            if !$self->{term_received} && $keepalive;
+                    if ( $self->{term_received} && $keepalive ) {
+                        IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
+                        $keep_conn{$remote} = [$conn,time];
+                    }
                 }
                 else {
                     my $method = 'exit';
