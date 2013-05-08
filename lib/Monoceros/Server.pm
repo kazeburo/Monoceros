@@ -96,7 +96,7 @@ sub setup_sockpair {
 
     my @defer_pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
         or die "failed to create socketpair: $!";
-    $self->{defer_pipe} = \@worker_pipe; 
+    $self->{defer_pipe} = \@defer_pipe; 
 
     my @lstn_pipes;
     for (0..1) {
