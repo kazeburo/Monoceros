@@ -357,6 +357,7 @@ sub request_worker {
                 my $conn;
                 my $peername;
                 my $pipe_n;
+                my $accept_direct = 0;
                 for my $pipe_or_sock ( @can_read ) {
                     if ( $self->{_using_defer_accept} && $pipe_or_sock eq $self->{listen_sock} ) {
                         my ($fh,$peer) = $self->{listen_sock}->accept;
@@ -367,6 +368,7 @@ sub request_worker {
                         $conn = $fh;
                         $peername = $peer;
                         $pipe_n = KEEP_CONNECTION;
+                        $accept_direct = 1;
                     }
                     else {
                         my $fd = IO::FDPass::recv($pipe_or_sock->fileno);
@@ -408,8 +410,9 @@ sub request_worker {
                                       #  treat every connection as keepalive 
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
 
-                if ( $self->{_using_defer_accept} && !$self->{term_received} && $keepalive ) {
-                    IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
+                if ( $accept_direct ) {
+                    IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno)
+                            if !$self->{term_received} && $keepalive;
                 }
                 else {
                     my $method = 'exit';
