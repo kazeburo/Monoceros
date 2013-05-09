@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.03 2013-05-09T01:46:46Z
+
+   - accept(2) in workers if enabled defer_accept.
+
 0.02 2013-05-07T07:35:30Z
 
    - refactoring & performance tuning 
