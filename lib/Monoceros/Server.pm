@@ -198,16 +198,19 @@ sub connection_manager {
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
         for my $key ( keys %sockets ) {
-            if ( $sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{timeout} ) { #idle && timeout
+            if ( !$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected() ) {
                 delete $wait_read{$key};
                 delete $sockets{$key};
             }
-            elsif ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
-                # not idle && timeout
-                if ( !$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected() ) {
-                    delete $wait_read{$key};
-                    delete $sockets{$key};
-                }
+            elsif ( $sockets{$key}->[S_IDLE] && $sockets{$key}->[S_REQS] == 0 
+                     && $time - $sockets{$key}->[1] > $self->{timeout} ) { #idle && first req 
+                delete $wait_read{$key};
+                delete $sockets{$key};
+            }
+            elsif ( $sockets{$key}->[S_IDLE] && $sockets{$key}->[S_REQS] > 0 &&
+                     $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) { #idle && keepalive
+                delete $wait_read{$key};
+                delete $sockets{$key};
             }
         }
     };
