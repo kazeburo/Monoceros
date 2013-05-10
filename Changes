@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.07 2013-05-10T11:25:39Z
+
+  - refactoring around accepted sockets in worker.
+
 0.06 2013-05-10T06:03:49Z
 
   - bugfix. recv() incorrect fd
