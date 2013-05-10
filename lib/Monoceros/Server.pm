@@ -370,7 +370,10 @@ sub request_worker {
             while ( $proc_req_count < $max_reqs_per_child ) {
                 my $time = time;
                 for my $key (keys %keep_conn) {
-                    delete $keep_conn{$key} if $time - $keep_conn{$key}->[1] > $self->{keepalive_timeout};
+                    if ( $time - $keep_conn{$key}->[1] > $self->{keepalive_timeout} ) {
+                        $select->remove($keep_conn{$key}->[0]);
+                        delete $keep_conn{$key};
+                    }
                 }
 
                 my @can_read = $select->can_read(1);
@@ -383,13 +386,18 @@ sub request_worker {
                 my $pipe_n;
                 my $accept_direct = 0;
                 
-                for my $pipe_or_sock ( @can_read ) {
-                    if ( $self->{_using_defer_accept} ) {
+                if ( $self->{_using_defer_accept} ) {
+                    my @filtered_can_read;
+                    while ( my $pipe_or_sock = shift @can_read ) {
                         if ( my $key = first { $keep_conn{$_}->[0] eq $pipe_or_sock } keys %keep_conn ) {
                             $select->remove($pipe_or_sock);
                             delete $keep_conn{$key};
                         }
+                        else {
+                            push @filtered_can_read, $pipe_or_sock;
+                        }
                     }
+                    @can_read = @filtered_can_read;
                 }
                 for my $pipe_or_sock ( @can_read ) {
                     if ( $self->{_using_defer_accept} && $pipe_or_sock eq $self->{listen_sock} ) {
@@ -402,13 +410,12 @@ sub request_worker {
                         $peername = $peer;
                         $pipe_n = KEEP_CONNECTION;
                         $accept_direct = 1;
-                        
                         last;
                     }
-                    else {
+                    $pipe_n = first { $pipe_or_sock eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
+                    if ( defined $pipe_n ) {
                         my $fd = IO::FDPass::recv($pipe_or_sock->fileno);
                         if ( $fd >= 0 ) {
-                            $pipe_n = first { $pipe_or_sock eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
                             $conn = IO::Socket::INET->new_from_fd($fd,'r+')
                                 or die "unable to convert file descriptor to handle: $!";
                             $peername = $conn->peername;
@@ -447,23 +454,23 @@ sub request_worker {
                 if ( $accept_direct ) {
                     my $ret = $conn->sysread($prebuf, MAX_REQUEST_SIZE);
                     if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) ) {
-                        IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
                         $select->add($conn);
                         $keep_conn{$remote} = [$conn,time];
-                        return;
+                        IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
+                        next;
                     }
                 }
                 my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive, $prebuf);
 
                 if ( $accept_direct ) {
                     if ( !$self->{term_received} && $keepalive ) {
-                        IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
                         $select->add($conn);
                         $keep_conn{$remote} = [$conn,time];
+                        IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
                     }
                 }
                 else {
-                    $select->add($conn) if delete $keep_conn{$remote};
+                    $select->remove($conn) if delete $keep_conn{$remote};
                     my $method = 'exit';
                     if ( !$self->{term_received} && $keepalive ) {
                         $method = 'keep';
@@ -535,7 +542,6 @@ sub handle_connection {
         if ($reqlen == -2) {
             # request is incomplete, do nothing
         } elsif ($reqlen == -1) {
-            warn "fff";
             # error, close conn
             last;
         }
