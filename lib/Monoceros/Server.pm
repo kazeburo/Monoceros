@@ -12,7 +12,9 @@ use AnyEvent::Util qw(fh_nonblocking);
 use Digest::MD5 qw/md5_hex/;
 use Time::HiRes qw/time/;
 use Carp ();
+use Plack::TempBuffer;
 use Plack::Util;
+use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use List::Util qw/first/;
@@ -27,6 +29,9 @@ use constant S_IDLE => 3;
 
 use constant KEEP_CONNECTION => 0;
 use constant CLOSE_CONNECTION => 1;
+
+use constant MAX_REQUEST_SIZE => 131072;
+my $null_io = do { open my $io, "<", \""; $io };
 
 sub new {
     my $class = shift;
@@ -198,7 +203,7 @@ sub connection_manager {
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
         for my $key ( keys %sockets ) {
-            if ( !$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected() ) {
+            if ( !$sockets{$key}->[S_IDLE] && (!$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected()) ) {
                 delete $wait_read{$key};
                 delete $sockets{$key};
             }
@@ -233,8 +238,11 @@ sub connection_manager {
                 $sockets{$remote} = [$fh,time,1,1];  #fh,time,reqs,idle
                 $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
                     undef $wait_read{$remote};
-                    $self->queued_fdsend($sockets{$remote})
-                        if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
+                    if ( !$sockets{$remote}->[S_SOCK] || !$sockets{$remote}->[S_SOCK]->connected()) {
+                        delete $sockets{$remote};
+                        return;
+                    }
+                    $self->queued_fdsend($sockets{$remote});
                 };
             }
         };
@@ -254,6 +262,10 @@ sub connection_manager {
                     or die "setsockopt(TCP_NODELAY) failed:$!";
                 $wait_read{$remote} = AE::io $fh, 0, sub {
                     undef $wait_read{$remote};
+                    if ( !$sockets{$remote}->[S_SOCK] || !$sockets{$remote}->[S_SOCK]->connected()) {
+                        delete $sockets{$remote};
+                        return;
+                    }
                     $self->queued_fdsend($sockets{$remote});
                 };
             }
@@ -287,8 +299,11 @@ sub connection_manager {
             $sockets{$remote}->[S_IDLE] = 1; #idle
             $wait_read{$remote} = AE::io $sockets{$remote}->[S_SOCK], 0, sub {
                 undef $wait_read{$remote};
-                $self->queued_fdsend($sockets{$remote}) 
-                    if $sockets{$remote}->[S_SOCK] && $sockets{$remote}->[S_SOCK]->connected();
+                if ( !$sockets{$remote}->[S_SOCK] || !$sockets{$remote}->[S_SOCK]->connected()) {
+                    delete $sockets{$remote};
+                    return;
+                }
+                $self->queued_fdsend($sockets{$remote});
             };
         }
 
@@ -367,6 +382,15 @@ sub request_worker {
                 my $peername;
                 my $pipe_n;
                 my $accept_direct = 0;
+                
+                for my $pipe_or_sock ( @can_read ) {
+                    if ( $self->{_using_defer_accept} ) {
+                        if ( my $key = first { $keep_conn{$_}->[0] eq $pipe_or_sock } keys %keep_conn ) {
+                            $select->remove($pipe_or_sock);
+                            delete $keep_conn{$key};
+                        }
+                    }
+                }
                 for my $pipe_or_sock ( @can_read ) {
                     if ( $self->{_using_defer_accept} && $pipe_or_sock eq $self->{listen_sock} ) {
                         my ($fh,$peer) = $self->{listen_sock}->accept;
@@ -378,6 +402,7 @@ sub request_worker {
                         $peername = $peer;
                         $pipe_n = KEEP_CONNECTION;
                         $accept_direct = 1;
+                        
                         last;
                     }
                     else {
@@ -418,16 +443,27 @@ sub request_worker {
                 $self->{_is_deferred_accept} = 1; #ready to read
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive 
-                my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive);
+                my $prebuf;
+                if ( $accept_direct ) {
+                    my $ret = $conn->sysread($prebuf, MAX_REQUEST_SIZE);
+                    if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) ) {
+                        IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
+                        $select->add($conn);
+                        $keep_conn{$remote} = [$conn,time];
+                        return;
+                    }
+                }
+                my $keepalive = $self->handle_connection($env, $conn, $app, $pipe_n != CLOSE_CONNECTION, $is_keepalive, $prebuf);
 
                 if ( $accept_direct ) {
                     if ( !$self->{term_received} && $keepalive ) {
                         IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
+                        $select->add($conn);
                         $keep_conn{$remote} = [$conn,time];
                     }
                 }
                 else {
-                    delete $keep_conn{$remote};
+                    $select->add($conn) if delete $keep_conn{$remote};
                     my $method = 'exit';
                     if ( !$self->{term_received} && $keepalive ) {
                         $method = 'keep';
@@ -441,5 +477,84 @@ sub request_worker {
     exit;
 }
 
+sub handle_connection {
+    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf) = @_;
+    
+    my $buf = '';
+    my $res = [ 400, [ 'Content-Type' => 'text/plain' ], [ 'Bad Request' ] ];
+    
+    local $self->{can_exit} = 1;
+    while (1) {
+        my $rlen;
+        if ( defined $prebuf ) {
+            $rlen = length $prebuf;
+            $buf = $prebuf;
+            undef $prebuf;
+        }
+        else {
+            $rlen = $self->read_timeout(
+                $conn, \$buf, MAX_REQUEST_SIZE - length($buf), length($buf),
+                $is_keepalive ? $self->{keepalive_timeout} : $self->{timeout},
+            ) or return;
+        }
+        $self->{can_exit} = 0;
+        my $reqlen = parse_http_request($buf, $env);
+        if ($reqlen >= 0) {
+            # handle request
+            if ($use_keepalive) {
+                if (my $c = $env->{HTTP_CONNECTION}) {
+                    $use_keepalive = undef
+                        unless $c =~ /^\s*keep-alive\s*/i;
+                } else {
+                    $use_keepalive = undef;
+                }
+            }
+            $buf = substr $buf, $reqlen;
+            if (my $cl = $env->{CONTENT_LENGTH}) {
+                my $buffer = Plack::TempBuffer->new($cl);
+                while ($cl > 0) {
+                    my $chunk;
+                    if (length $buf) {
+                        $chunk = $buf;
+                        $buf = '';
+                    } else {
+                        $self->read_timeout(
+                            $conn, \$chunk, $cl, 0, $self->{timeout})
+                            or return;
+                    }
+                    $buffer->print($chunk);
+                    $cl -= length $chunk;
+                }
+                $env->{'psgi.input'} = $buffer->rewind;
+            } else {
+                $env->{'psgi.input'} = $null_io;
+            }
+            $res = Plack::Util::run_app $app, $env;
+            last;
+        }
+        if ($reqlen == -2) {
+            # request is incomplete, do nothing
+        } elsif ($reqlen == -1) {
+            warn "fff";
+            # error, close conn
+            last;
+        }
+    }
+
+    if (ref $res eq 'ARRAY') {
+        $self->_handle_response($res, $conn, \$use_keepalive);
+    } elsif (ref $res eq 'CODE') {
+        $res->(sub {
+            $self->_handle_response($_[0], $conn, \$use_keepalive);
+        });
+    } else {
+        die "Bad response $res";
+    }
+    if ($self->{term_received}) {
+        exit 0;
+    }
+    
+    return $use_keepalive;
+}
 
 1;
