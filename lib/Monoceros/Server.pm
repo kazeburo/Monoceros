@@ -79,7 +79,7 @@ sub new {
             defined $args{err_respawn_interval}
                 ? $args{err_respawn_interval} : undef,
         ),
-        _using_defer_accept  => undef,
+        _using_defer_accept  => 1,
         listen_sock => ( defined $listen_sock ? $listen_sock : undef),
     }, $class;
 
@@ -347,18 +347,21 @@ sub request_worker {
 
     while ($pm->signal_received !~ /^(TERM)$/) {
         $pm->start(sub {
+            my %sys_fileno;
             my $select = IO::Select->new();
             for (0..1) {
+                $sys_fileno{$self->{lstn_pipes}[$_][READER]->fileno} = 1;
                 $select->add($self->{lstn_pipes}[$_][READER]);
             }
             if ( $self->{_using_defer_accept} ) {
+                $sys_fileno{$self->{listen_sock}->fileno} = 1;
                 $select->add($self->{listen_sock});
             }
 
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
             my $proc_req_count = 0;
             $self->{can_exit} = 1;
-            
+
             local $SIG{TERM} = sub {
                 exit 0 if $self->{can_exit};
                 $self->{term_received}++;
@@ -366,16 +369,8 @@ sub request_worker {
                 
             };
             local $SIG{PIPE} = 'IGNORE';
-            my %keep_conn;
-            while ( $proc_req_count < $max_reqs_per_child ) {
-                my $time = time;
-                for my $key (keys %keep_conn) {
-                    if ( $time - $keep_conn{$key}->[1] > $self->{keepalive_timeout} ) {
-                        $select->remove($keep_conn{$key}->[0]);
-                        delete $keep_conn{$key};
-                    }
-                }
 
+            while ( $proc_req_count < $max_reqs_per_child ) {
                 my @can_read = $select->can_read(1);
                 if ( !@can_read ) {
                     next;
@@ -386,21 +381,13 @@ sub request_worker {
                 my $pipe_n;
                 my $accept_direct = 0;
                 
-                if ( $self->{_using_defer_accept} ) {
-                    my @filtered_can_read;
-                    while ( my $pipe_or_sock = shift @can_read ) {
-                        if ( my $key = first { $keep_conn{$_}->[0] eq $pipe_or_sock } keys %keep_conn ) {
-                            $select->remove($pipe_or_sock);
-                            delete $keep_conn{$key};
-                        }
-                        else {
-                            push @filtered_can_read, $pipe_or_sock;
-                        }
+                for (@can_read) {
+                    if ( ! exists $sys_fileno{$_->fileno} ) {
+                        $select->remove($_);
                     }
-                    @can_read = @filtered_can_read;
                 }
                 for my $pipe_or_sock ( @can_read ) {
-                    if ( $self->{_using_defer_accept} && $pipe_or_sock eq $self->{listen_sock} ) {
+                    if ( $self->{_using_defer_accept} && $pipe_or_sock->fileno eq $self->{listen_sock}->fileno ) {
                         my ($fh,$peer) = $self->{listen_sock}->accept;
                         next unless $fh;
                         $fh->blocking(0);
@@ -412,7 +399,7 @@ sub request_worker {
                         $accept_direct = 1;
                         last;
                     }
-                    $pipe_n = first { $pipe_or_sock eq $self->{lstn_pipes}[$_][READER] } qw(0 1);
+                    $pipe_n = first { $pipe_or_sock->fileno eq $self->{lstn_pipes}[$_][READER]->fileno } qw(0 1);
                     if ( defined $pipe_n ) {
                         my $fd = IO::FDPass::recv($pipe_or_sock->fileno);
                         if ( $fd >= 0 ) {
@@ -455,7 +442,6 @@ sub request_worker {
                     my $ret = $conn->sysread($prebuf, MAX_REQUEST_SIZE);
                     if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) ) {
                         $select->add($conn);
-                        $keep_conn{$remote} = [$conn,time];
                         IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
                         next;
                     }
@@ -465,12 +451,10 @@ sub request_worker {
                 if ( $accept_direct ) {
                     if ( !$self->{term_received} && $keepalive ) {
                         $select->add($conn);
-                        $keep_conn{$remote} = [$conn,time];
-                        IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
+                         IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->fileno);
                     }
                 }
                 else {
-                    $select->remove($conn) if delete $keep_conn{$remote};
                     my $method = 'exit';
                     if ( !$self->{term_received} && $keepalive ) {
                         $method = 'keep';
