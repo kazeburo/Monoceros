@@ -2,6 +2,13 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.05 2013-05-10T02:28:02Z
+
+  - pre-sysread for tcp_defer_accept sockets.
+    if sysread returns EAGAIN. push a socket to connection manager process.
+    relate url: https://bugs.launchpad.net/ubuntu/+source/apache2/+bug/134274
+                https://forums.aws.amazon.com/thread.jspa?threadID=45564
+
 0.04 2013-05-09T04:28:31Z
 
    - refactoring around timeout and disconnected sockets
