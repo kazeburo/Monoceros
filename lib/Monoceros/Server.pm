@@ -137,7 +137,6 @@ sub queued_fdsend {
                 shift @{$self->{fdsend_queue}};
                 next;
             }
-            my $remote = md5_hex($self->{fdsend_queue}[0][S_SOCK]->peername);
             if ( ! IO::FDPass::send(fileno $self->{lstn_pipe}[WRITER], fileno $self->{fdsend_queue}[0][S_SOCK] ) ) {
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 undef $self->{fdsend_worker};
