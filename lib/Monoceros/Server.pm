@@ -185,8 +185,8 @@ sub connection_manager {
                 }
             }
             return if keys %sockets;
-            kill 'TERM', $worker_pid; #stop process
             undef $t;
+            kill 'TERM', $worker_pid; #stop process
             $cv->send;
         };
     };
@@ -334,7 +334,7 @@ sub request_worker {
 
     my $pm = Parallel::Prefork->new(\%pm_args);
 
-    while ($pm->signal_received !~ /^(TERM|USR1)$/) {
+    while ($pm->signal_received !~ /^(TERM)$/) {
         $pm->start(sub {
             srand();
             my %sys_fileno;
@@ -355,9 +355,6 @@ sub request_worker {
                 $self->{term_received}++;
                 exit 0 if $self->{term_received} > 1;
                 
-            };
-            local $SIG{USR1} = sub {
-                $self->{term_received}++;
             };
 
             local $SIG{PIPE} = 'IGNORE';
