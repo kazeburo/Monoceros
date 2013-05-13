@@ -49,7 +49,7 @@ And this server inherit L<Starlet>. Monoceros supports following features too.
 
 - fast HTTP processing using L<HTTP::Parser::XS> (optional)
 
-But Monoceros does not support spawn-interval.
+But Monoceros does not support max-keepalive-reqs and spawn-interval.
 
 =head1 COMMAND LINE OPTIONS
 
@@ -67,10 +67,6 @@ seconds until timeout (default: 300)
 =head2 --keepalive-timeout=#
 
 timeout for persistent connections (default: 10)
-
-=head2 --max-keepalive-reqs=#
-
-max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 100)
 
 =head2 --max-reqs-per-child=#
 

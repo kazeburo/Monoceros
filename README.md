@@ -36,7 +36,7 @@ And this server inherit [Starlet](http://search.cpan.org/perldoc?Starlet). Monoc
 
 \- fast HTTP processing using [HTTP::Parser::XS](http://search.cpan.org/perldoc?HTTP::Parser::XS) (optional)
 
-But Monoceros does not support spawn-interval.
+But Monoceros does not support max-keepalive-reqs and spawn-interval.
 
 # COMMAND LINE OPTIONS
 
@@ -54,10 +54,6 @@ seconds until timeout (default: 300)
 ## \--keepalive-timeout=\#
 
 timeout for persistent connections (default: 10)
-
-## \--max-keepalive-reqs=\#
-
-max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 100)
 
 ## \--max-reqs-per-child=\#
 

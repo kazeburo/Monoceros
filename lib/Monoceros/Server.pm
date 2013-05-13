@@ -27,9 +27,6 @@ use constant S_TIME => 1;
 use constant S_REQS => 2;
 use constant S_IDLE => 3;
 
-use constant KEEP_CONNECTION => 0;
-use constant CLOSE_CONNECTION => 1;
-
 use constant MAX_REQUEST_SIZE => 131072;
 my $null_io = do { open my $io, "<", \""; $io };
 
@@ -103,13 +100,9 @@ sub setup_sockpair {
         or die "failed to create socketpair: $!";
     $self->{defer_pipe} = \@defer_pipe; 
 
-    my @lstn_pipes;
-    for (0..1) {
-        my @pipe_lstn = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
-            or die "failed to create socketpair: $!";
-        push @lstn_pipes, \@pipe_lstn;
-    }
-    $self->{lstn_pipes} = \@lstn_pipes;
+    my @lstn_pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
+            or die "failed to create socketpair: $!";    
+    $self->{lstn_pipe} = \@lstn_pipe;
 
     1;
 }
@@ -141,31 +134,24 @@ sub queued_fdsend {
     my $self = shift;
     my $info = shift;
 
-    my $pipe_n = KEEP_CONNECTION;
-    if ( $info->[S_REQS] + 1 >= $self->{max_keepalive_reqs} ) {
-        $pipe_n = CLOSE_CONNECTION;
-    }
-    my $queue = "fdsend_queue_$pipe_n";
-    my $worker = "fdsend_worker_$pipe_n";
-
     $info->[S_IDLE] = 0; #no-idle
 
-    $self->{$queue} ||= [];
-    push @{$self->{$queue}},  $info;
-    $self->{$worker} ||= AE::io $self->{lstn_pipes}[$pipe_n][WRITER], 1, sub {
+    $self->{fdsend_queue} ||= [];
+    push @{$self->{fdsend_queue}},  $info;
+    $self->{fdsend_worker} ||= AE::io $self->{lstn_pipe}[WRITER], 1, sub {
         do {
-            if ( !$self->{$queue}[0][S_SOCK] ) {
-                shift @{$self->{$queue}};
+            if ( !$self->{fdsend_queue}[S_SOCK] ) {
+                shift @{$self->{fdsend_queue}};
                 return;
             }
-            if ( ! IO::FDPass::send(fileno $self->{lstn_pipes}[$pipe_n][WRITER], fileno $self->{$queue}[0][S_SOCK] ) ) {
+            if ( ! IO::FDPass::send(fileno $self->{lstn_pipe}[WRITER], fileno $self->{fdsend_queue}[0][S_SOCK] ) ) {
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                undef $self->{$worker};
+                undef $self->{fdsend_worker};
                 die "unable to pass file handle: $!"; 
             }
-            shift @{$self->{$queue}};
-        } while @{$self->{$queue}};
-        undef $self->{$worker};
+            shift @{$self->{fdsend_queue}};
+        } while @{$self->{fdsend_queue}};
+        undef $self->{fdsend_worker};
     };
 
     1;
@@ -174,10 +160,8 @@ sub queued_fdsend {
 sub connection_manager {
     my ($self, $worker_pid) = @_;
 
-    for (0..1) {
-        $self->{lstn_pipes}[$_][READER]->close;
-        fh_nonblocking $self->{lstn_pipes}[$_][WRITER], 1;
-    }
+    $self->{lstn_pipe}[READER]->close;
+    fh_nonblocking $self->{lstn_pipe}[WRITER], 1;
     $self->{worker_pipe}->[WRITER]->close;
     fh_nonblocking $self->{worker_pipe}->[READER], 1;
     $self->{defer_pipe}->[WRITER]->close;
@@ -325,11 +309,8 @@ sub request_worker {
 
     $self->{worker_pipe}->[READER]->close;
     $self->{defer_pipe}->[READER]->close;
-
-    for (0..1) {
-        $self->{lstn_pipes}[$_][WRITER]->close;
-        $self->{lstn_pipes}[$_][READER]->blocking(0);
-    }
+    $self->{lstn_pipe}[WRITER]->close;
+    $self->{lstn_pipe}[READER]->blocking(0);
 
     # use Parallel::Prefork
     my %pm_args = (
@@ -350,10 +331,8 @@ sub request_worker {
             srand();
             my %sys_fileno;
             my $select = IO::Select->new();
-            for (0..1) {
-                $sys_fileno{$self->{lstn_pipes}[$_][READER]->fileno} = 1;
-                $select->add($self->{lstn_pipes}[$_][READER]);
-            }
+            $sys_fileno{$self->{lstn_pipe}[READER]->fileno} = 1;
+            $select->add($self->{lstn_pipe}[READER]);
             if ( $self->{_using_defer_accept} ) {
                 $sys_fileno{$self->{listen_sock}->fileno} = 1;
                 $select->add($self->{listen_sock});
@@ -392,7 +371,7 @@ sub request_worker {
                     $conn = $self->accept_or_recv( shuffle grep { exists $sys_fileno{$_->fileno} } @can_read );
                 }
 
-                next unless $conn;                
+                next unless $conn;
                 
                 ++$proc_req_count;
                 my ($peerport,$peerhost) = unpack_sockaddr_in $conn->{peername};
@@ -415,8 +394,6 @@ sub request_worker {
                     'psgix.io'          => $conn->{fh},
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
-                my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
-                                      #  treat every connection as keepalive 
                 my $prebuf;
                 if ( exists $conn->{buf} ) {
                     $prebuf = delete $conn->{buf};
@@ -429,8 +406,12 @@ sub request_worker {
                         next;
                     }
                 }
+                my $may_keepalive = !$self->{term_received};
+                my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
+                                      #  treat every connection as keepalive
+                
                 my $keepalive = $self->handle_connection($env, $conn->{fh}, $app, 
-                                                         $conn->{pipe_n} != CLOSE_CONNECTION, $is_keepalive, $prebuf);
+                                                         $may_keepalive, $is_keepalive, $prebuf);
                 if ( !$keepalive ) {
                     $self->{worker_pipe}->[WRITER]->syswrite("exit $remote")
                         unless $conn->{direct};
@@ -439,7 +420,7 @@ sub request_worker {
 
                 # read fowrard
                 if ( $select->count() <= scalar(keys  %sys_fileno) + $self->{max_workers} ) {
-                    $next_conn = $self->accept_or_recv( shuffle grep { exists $sys_fileno{$_->fileno} } $select->handles );
+                    $next_conn = $self->accept_or_recv( $self->{lstn_pipe}[READER], $self->{listen_sock} );
                     if ( ! $next_conn ) {
                         my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                         # readed next req
@@ -481,13 +462,12 @@ sub accept_or_recv {
                 fh => $fh,
                 fn => $fh->fileno,
                 peername => $peer,
-                pipe_n => KEEP_CONNECTION,
                 direct => 1,
+                reqs => 0,
             };
             last;
         }
-        my $pipe_n = first { $pipe_or_sock->fileno eq $self->{lstn_pipes}[$_][READER]->fileno } qw(0 1);
-        if ( defined $pipe_n ) {
+        elsif ( $pipe_or_sock->fileno eq $self->{lstn_pipe}[READER]->fileno ) {
             my $fd = IO::FDPass::recv($pipe_or_sock->fileno);
             if ( $fd >= 0 ) {
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
@@ -496,8 +476,8 @@ sub accept_or_recv {
                     fh => $fh,
                     fn => $fh->fileno,
                     peername => $fh->peername,
-                    pipe_n => $pipe_n,
                     direct => 0,
+                    reqs => 0,
                 };
                 last;
             }
