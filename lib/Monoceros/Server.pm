@@ -177,6 +177,13 @@ sub connection_manager {
         $term_received++;
         kill 'TERM', $worker_pid; #stop accept
         my $t;$t = AE::timer 0, 1, sub {
+            my $time = time;
+            for my $key ( keys %sockets ) {
+                if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
+                    delete $wait_read{$key};
+                    delete $sockets{$key};                
+                }
+            }
             return if keys %sockets;
             kill 'TERM', $worker_pid; #stop process
             undef $t;
@@ -454,7 +461,6 @@ sub accept_or_recv {
     my $conn;
     for my $pipe_or_sock ( @for_read ) {
         if ( $self->{_using_defer_accept} && $pipe_or_sock->fileno eq $self->{listen_sock}->fileno ) {
-            next if $self->{term_received};
             my ($fh,$peer) = $self->{listen_sock}->accept;
             next unless $fh;
             $fh->blocking(0);
