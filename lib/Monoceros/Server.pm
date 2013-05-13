@@ -17,7 +17,6 @@ use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
-use List::Util qw/shuffle first/;
 
 use constant WRITER => 0;
 use constant READER => 1;
@@ -368,7 +367,7 @@ sub request_worker {
                             $select->remove($_);
                         }
                     }
-                    $conn = $self->accept_or_recv( shuffle grep { exists $sys_fileno{$_->fileno} } @can_read );
+                    $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read );
                 }
 
                 next unless $conn;
