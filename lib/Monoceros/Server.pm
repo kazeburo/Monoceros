@@ -117,14 +117,17 @@ sub run_workers {
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
+        exit;
     }
     else {
         die "failed fork:$!";
     }
 
-    while (1) { 
-        my $kid = waitpid(-1, WNOHANG);
-        last if $kid < 1;
+    while (1){
+        my $kid = waitpid( -1, WNOHANG );
+        last if $kid < 0;
+        select undef, undef, undef, 1;
+        kill 'TERM', $pid;
     }
     undef $blocker;
 }
@@ -176,7 +179,7 @@ sub connection_manager {
     my $sig;$sig = AE::signal 'TERM', sub {
         $term_received++;
         kill 'USR1', $worker_pid; #stop accept
-        my $t;$t = AE::timer 0, 1, sub {
+        my $t;$t = AE::timer 1, 1, sub {
             my $time = time;
             for my $key ( keys %sockets ) {
                 if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
@@ -334,7 +337,7 @@ sub request_worker {
 
     my $pm = Parallel::Prefork->new(\%pm_args);
 
-    while ($pm->signal_received !~ /^(TERM)$/) {
+    while ($pm->signal_received !~ /^(?:TERM)$/) {
         $pm->start(sub {
             srand();
             my %sys_fileno;
@@ -353,8 +356,7 @@ sub request_worker {
             $self->{term_received} = 0;
             local $SIG{TERM} = sub {
                 $self->{term_received}++;
-                exit 0 if $self->{term_received} > 1;
-                
+                exit 0 if $self->{term_received} > 1;                
             };
 
             local $SIG{PIPE} = 'IGNORE';
