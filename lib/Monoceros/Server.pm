@@ -175,9 +175,10 @@ sub connection_manager {
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
         $term_received++;
+        kill 'TERM', $worker_pid; #stop accept
         my $t;$t = AE::timer 0, 1, sub {
             return if keys %sockets;
-            kill 'TERM', $worker_pid;
+            kill 'TERM', $worker_pid; #stop process
             undef $t;
             $cv->send;
         };
@@ -232,8 +233,8 @@ sub connection_manager {
     }
     else {
         $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
-            return if $term_received;
             L_SOCK_READ: for (1..$self->{max_workers}) {
+                return if $term_received;
                 my ($fh,$peer) = $self->{listen_sock}->accept;
                 last L_SOCK_READ if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 next unless $fh;
@@ -341,8 +342,8 @@ sub request_worker {
             my $proc_req_count = 0;
             $self->{can_exit} = 1;
 
+            $self->{term_received} = 0;
             local $SIG{TERM} = sub {
-                exit 0 if $self->{can_exit};
                 $self->{term_received}++;
                 exit 0 if $self->{term_received} > 1;
                 
@@ -351,7 +352,7 @@ sub request_worker {
 
             my $next_conn;
 
-            while ( $proc_req_count < $max_reqs_per_child ) {
+            while ( $self->{term_received} == 1 || $proc_req_count < $max_reqs_per_child ) {
                 my $conn;
                 if ( $next_conn ) {
                     $conn = $next_conn;
@@ -369,7 +370,6 @@ sub request_worker {
                     }
                     $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read );
                 }
-
                 next unless $conn;
                 
                 ++$proc_req_count;
@@ -405,7 +405,7 @@ sub request_worker {
                         next;
                     }
                 }
-                my $may_keepalive = !$self->{term_received};
+                my $may_keepalive = $self->{term_received} == 0;
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 
@@ -419,7 +419,9 @@ sub request_worker {
 
                 # read fowrard
                 if ( $select->count() <= scalar(keys  %sys_fileno) + $self->{max_workers} ) {
-                    $next_conn = $self->accept_or_recv( $self->{lstn_pipe}[READER], $self->{listen_sock} );
+                    $next_conn = $self->accept_or_recv( 
+                        $self->{_using_defer_accept} ? ($self->{lstn_pipe}[READER], $self->{listen_sock}) : ($self->{lstn_pipe}[READER])
+                    );
                     if ( ! $next_conn ) {
                         my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                         # readed next req
@@ -452,6 +454,7 @@ sub accept_or_recv {
     my $conn;
     for my $pipe_or_sock ( @for_read ) {
         if ( $self->{_using_defer_accept} && $pipe_or_sock->fileno eq $self->{listen_sock}->fileno ) {
+            next if $self->{term_received};
             my ($fh,$peer) = $self->{listen_sock}->accept;
             next unless $fh;
             $fh->blocking(0);
@@ -560,10 +563,7 @@ sub handle_connection {
     } else {
         die "Bad response $res";
     }
-    if ($self->{term_received}) {
-        exit 0;
-    }
-    
+
     return $use_keepalive;
 }
 
