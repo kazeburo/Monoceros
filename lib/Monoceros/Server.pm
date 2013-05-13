@@ -175,7 +175,7 @@ sub connection_manager {
     my $cv = AE::cv;
     my $sig;$sig = AE::signal 'TERM', sub {
         $term_received++;
-        kill 'TERM', $worker_pid; #stop accept
+        kill 'USR1', $worker_pid; #stop accept
         my $t;$t = AE::timer 0, 1, sub {
             my $time = time;
             for my $key ( keys %sockets ) {
@@ -325,6 +325,7 @@ sub request_worker {
         trap_signals => {
             TERM => 'TERM',
             HUP  => 'TERM',
+            USR1 => 'TERM',
         },
     );
     if (defined $self->{err_respawn_interval}) {
@@ -333,7 +334,7 @@ sub request_worker {
 
     my $pm = Parallel::Prefork->new(\%pm_args);
 
-    while ($pm->signal_received !~ /^(TERM)$/) {
+    while ($pm->signal_received !~ /^(TERM|USR1)$/) {
         $pm->start(sub {
             srand();
             my %sys_fileno;
@@ -355,6 +356,10 @@ sub request_worker {
                 exit 0 if $self->{term_received} > 1;
                 
             };
+            local $SIG{USR1} = sub {
+                $self->{term_received}++;
+            };
+
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
