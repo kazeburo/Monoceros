@@ -110,10 +110,9 @@ sub run_workers {
     my ($self,$app) = @_;
     local $SIG{PIPE} = 'IGNORE';    
     my $pid = fork;  
-    my $blocker;
     if ( $pid ) {
         #parent
-        $blocker = $self->connection_manager($pid);
+        $self->connection_manager($pid);
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
@@ -121,15 +120,7 @@ sub run_workers {
     }
     else {
         die "failed fork:$!";
-    }
-
-    while (1){
-        my $kid = waitpid( -1, WNOHANG );
-        last if $kid < 0;
-        select undef, undef, undef, 1;
-        kill 'TERM', $pid;
-    }
-    undef $blocker;
+    }    
 }
 
 sub queued_fdsend {
@@ -176,10 +167,19 @@ sub connection_manager {
     my %wait_read;
 
     my $cv = AE::cv;
+    $cv->begin;$cv->begin;
+    my $sig2;$sig2 = AE::signal 'USR1', sub {
+        kill 'TERM', $worker_pid;
+        my $t;$t = AE::timer 0, 1, sub {
+            my $kid = waitpid($worker_pid, WNOHANG);
+            undef $t if $kid < 0;
+            $cv->end;
+        };
+    };
     my $sig;$sig = AE::signal 'TERM', sub {
         $term_received++;
         kill 'USR1', $worker_pid; #stop accept
-        my $t;$t = AE::timer 1, 1, sub {
+        my $t;$t = AE::timer 0, 1, sub {
             my $time = time;
             for my $key ( keys %sockets ) {
                 if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) {
@@ -189,8 +189,7 @@ sub connection_manager {
             }
             return if keys %sockets;
             undef $t;
-            kill 'TERM', $worker_pid; #stop process
-            $cv->send;
+            $cv->end;
         };
     };
 
@@ -304,7 +303,6 @@ sub connection_manager {
     };
 
     $cv->recv;
-    \%manager;
 }
 
 sub request_worker {
@@ -328,7 +326,7 @@ sub request_worker {
         trap_signals => {
             TERM => 'TERM',
             HUP  => 'TERM',
-            USR1 => 'TERM',
+            USR1 => 'USR1',
         },
     );
     if (defined $self->{err_respawn_interval}) {
@@ -337,7 +335,7 @@ sub request_worker {
 
     my $pm = Parallel::Prefork->new(\%pm_args);
 
-    while ($pm->signal_received !~ /^(?:TERM)$/) {
+    while ($pm->signal_received !~ /^(?:TERM|USR1)$/) {
         $pm->start(sub {
             srand();
             my %sys_fileno;
@@ -351,19 +349,21 @@ sub request_worker {
 
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
             my $proc_req_count = 0;
-            $self->{can_exit} = 1;
-
+            
             $self->{term_received} = 0;
+            $self->{stop_accept} = 0;
             local $SIG{TERM} = sub {
                 $self->{term_received}++;
-                exit 0 if $self->{term_received} > 1;                
+                exit 0 if $self->{term_received} > 1;
             };
-
+            local $SIG{USR1} = sub {
+                $self->{stop_accept}++;
+            };
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
 
-            while ( $self->{term_received} == 1 || $proc_req_count < $max_reqs_per_child ) {
+            while ( $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 my $conn;
                 if ( $next_conn ) {
                     $conn = $next_conn;
@@ -381,6 +381,7 @@ sub request_worker {
                     }
                     $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read );
                 }
+                last if $self->{term_received} && !$conn; 
                 next unless $conn;
                 
                 ++$proc_req_count;
@@ -416,7 +417,7 @@ sub request_worker {
                         next;
                     }
                 }
-                my $may_keepalive = $self->{term_received} == 0;
+                my $may_keepalive = ($self->{term_received} == 0 && $self->{stop_accept} == 0);
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 
@@ -455,6 +456,10 @@ sub request_worker {
             }
         });
     }
+    local $SIG{TERM} = sub {
+        $pm->signal_all_children('TERM');
+    };
+    kill 'USR1', getppid();
     $pm->wait_all_children;
     exit;
 }
@@ -465,6 +470,7 @@ sub accept_or_recv {
     my $conn;
     for my $pipe_or_sock ( @for_read ) {
         if ( $self->{_using_defer_accept} && $pipe_or_sock->fileno eq $self->{listen_sock}->fileno ) {
+            next if $self->{stop_accept}; #stop accept
             my ($fh,$peer) = $self->{listen_sock}->accept;
             next unless $fh;
             $fh->blocking(0);
@@ -507,7 +513,6 @@ sub handle_connection {
     my $buf = '';
     my $res = [ 400, [ 'Content-Type' => 'text/plain' ], [ 'Bad Request' ] ];
     
-    local $self->{can_exit} = 1;
     while (1) {
         my $rlen;
         if ( defined $prebuf ) {
@@ -521,7 +526,7 @@ sub handle_connection {
                 $is_keepalive ? $self->{keepalive_timeout} : $self->{timeout},
             ) or return;
         }
-        $self->{can_exit} = 0;
+
         my $reqlen = parse_http_request($buf, $env);
         if ($reqlen >= 0) {
             # handle request
