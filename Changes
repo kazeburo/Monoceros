@@ -2,6 +2,12 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.08 2013-05-13T16:49:17Z
+
+  - read-forward next reqs/socket before select
+  - drop max-keepalive-reqs
+  - bugfix around graceful-stop   
+
 0.07 2013-05-10T11:25:39Z
 
   - refactoring around accepted sockets in worker.
