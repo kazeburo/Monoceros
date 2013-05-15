@@ -615,7 +615,7 @@ sub handle_connection {
                             $chunk_buffer = $trailer . $chunk_buffer;
                             last;
                         }
-                        $buf->print(substr $chunk_buffer, 0, $chunk_len, '');
+                        $buffer->print(substr $chunk_buffer, 0, $chunk_len, '');
                         $chunk_buffer =~ s/^\015\012//;
                         $length += $chunk_len;                        
                     }
