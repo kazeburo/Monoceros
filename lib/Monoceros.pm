@@ -21,7 +21,7 @@ Monoceros - PSGI/Plack server with event driven connection manager, preforking w
 
 =head1 DESCRIPTION
 
-Monoceros is PSGI/Plack server supports HTTP/1.0. Monoceros has a event-driven 
+Monoceros is PSGI/Plack server supports HTTP/1.1. Monoceros has a event-driven 
 connection manager and preforking workers. Monoceros can keep large amount of 
 connection at minimal processes.
 
@@ -39,7 +39,7 @@ Features of Monoceros
 
 - uses L<IO::FDPass> for passing a file descriptor to workers
 
-- supports HTTP/1.0 keepalive
+- supports HTTP/1.1 and also supports HTTP/1.0 keepalive
 
 And this server inherit L<Starlet>. Monoceros supports following features too.
 
