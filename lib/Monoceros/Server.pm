@@ -422,8 +422,8 @@ sub request_worker {
 
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
-                $may_keepalive = 0 if ($self->{term_received} || !$self->{stop_accept});
-                                         
+                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept});
+
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 
@@ -703,14 +703,19 @@ sub _handle_response {
                     && defined(my $cl = Plack::Util::content_length($body))) {
             push @lines, "Content-Length: $cl\015\012";
         } elsif ( $protocol eq 'HTTP/1.1' && ! Plack::Util::status_with_no_entity_body($status_code) ) {
-            push @lines, "Transfer-Encodinf: chunked\015\012";
+            push @lines, "Transfer-Encoding: chunked\015\012";
             $use_chunked = 1;
         } else {
             $$use_keepalive_r = undef
         }
         push @lines, "Connection: keep-alive\015\012"
-            if $$use_keepalive_r;
+            if $$use_keepalive_r && $protocol eq 'HTTP/1.0';
     }
+    else {
+        push @lines, "Connection: close\015\012"
+            if $protocol eq 'HTTP/1.1';
+    }
+
     unshift @lines, "HTTP/1.1 $status_code @{[ HTTP::Status::status_message($status_code) ]}\015\012";
     push @lines, "\015\012";
     
@@ -719,7 +724,7 @@ sub _handle_response {
         # combine response header and small request body
         my $buf = $body->[0];
         if ($use_chunked ) {
-            my $len = $buf;
+            my $len = length $buf;
             $buf = sprintf("%x",$len) . "\015\012" . $buf . "\015\012" . '0' . "\015\012\015\012";
         }
         my $len = $self->write_all(
