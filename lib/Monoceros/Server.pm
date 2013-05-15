@@ -535,7 +535,7 @@ sub handle_connection {
     
     my $buf = '';
     my $pipelined_buf='';
-    my $res = [ 400, [ 'Content-Type' => 'text/plain' ], [ 'Bad Request' ] ];
+    my $res = [ 400, [ 'Content-Type' => 'text/plain', 'Connection' => 'close' ], [ 'Bad Request' ] ];
 
     while (1) {
         my $rlen;
@@ -636,7 +636,7 @@ sub handle_connection {
                     $self->write_all($conn, "HTTP/1.1 100 Continue\015\012\015\012")
                         or return;
                 } else {
-                    $res = [417,[ 'Content-Type' => 'text/plain' ], [ 'Expectation Failed' ] ];
+                    $res = [417,[ 'Content-Type' => 'text/plain', 'Connection' => 'close' ], [ 'Expectation Failed' ] ];
                     last;
                 }
             }
