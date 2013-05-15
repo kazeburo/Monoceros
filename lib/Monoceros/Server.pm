@@ -27,6 +27,7 @@ use constant S_REQS => 2;
 use constant S_IDLE => 3;
 
 use constant MAX_REQUEST_SIZE => 131072;
+use constant CHUNKSIZE    => 64 * 1024;
 my $null_io = do { open my $io, "<", \""; $io };
 
 sub new {
@@ -364,8 +365,8 @@ sub request_worker {
 
             my $next_conn;
 
-            while ( $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
-                last if $self->{term_received};
+            while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
+                last if ( $self->{term_received} && !$next_conn);
                 my $conn;
                 if ( $next_conn ) {
                     $conn = $next_conn;
@@ -418,21 +419,31 @@ sub request_worker {
                         next;
                     }
                 }
-                my $may_keepalive = ($self->{term_received} == 0 && $self->{stop_accept} == 0 ) ? 1 : 0;
+
+                # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
+                my $may_keepalive = 1;
+                $may_keepalive = 0 if ($self->{term_received} || !$self->{stop_accept});
                                          
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 
-                my $keepalive = $self->handle_connection($env, $conn->{fh}, $app, 
+                my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
                                                          $may_keepalive, $is_keepalive, $prebuf);
                 if ( !$keepalive ) {
                     $self->{worker_pipe}->[WRITER]->syswrite("exit $remote") unless $conn->{direct};
                     next;
                 }
 
+                # pipeline
+                if ( defined $pipelined_buf && length $pipelined_buf ) {
+                    $next_conn = $conn;
+                    $next_conn->{buf} = $pipelined_buf;
+                    next;
+                }
+
                 # read fowrard
                 if ( $select->count() <= scalar(keys  %sys_fileno) + $self->{max_workers} 
-                         && $proc_req_count < $max_reqs_per_child) {
+                         && $proc_req_count < $max_reqs_per_child ) {
                     $next_conn = $self->accept_or_recv( 
                         $self->{_using_defer_accept} ? ($self->{lstn_pipe}[READER], $self->{listen_sock}) : ($self->{lstn_pipe}[READER])
                     );
@@ -445,7 +456,7 @@ sub request_worker {
                         }
                     }
                 }
-                # wait if !next_conn and ! defined next_buf
+                # wait if !next_conn
                 if ( !$next_conn  || ( $next_conn && $next_conn->{fn} != $conn->{fn}) ) {
                     if ( $conn->{direct} ) {
                         $select->add($conn->{fh});
@@ -523,8 +534,9 @@ sub handle_connection {
     my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf) = @_;
     
     my $buf = '';
+    my $pipelined_buf='';
     my $res = [ 400, [ 'Content-Type' => 'text/plain' ], [ 'Bad Request' ] ];
-    
+
     while (1) {
         my $rlen;
         if ( defined $prebuf ) {
@@ -542,15 +554,25 @@ sub handle_connection {
         my $reqlen = parse_http_request($buf, $env);
         if ($reqlen >= 0) {
             # handle request
+            my $protocol = $env->{SERVER_PROTOCOL}; 
             if ($use_keepalive) {
-                if (my $c = $env->{HTTP_CONNECTION}) {
-                    $use_keepalive = undef
-                        unless $c =~ /^\s*keep-alive\s*/i;
-                } else {
-                    $use_keepalive = undef;
+                if ( $protocol eq 'HTTP/1.1' ) {
+                    if (my $c = $env->{HTTP_CONNECTION}) {
+                        $use_keepalive = undef 
+                            if $c =~ /^\s*close\s*/i;
+                    }
+                }
+                else {
+                    if (my $c = $env->{HTTP_CONNECTION}) {
+                        $use_keepalive = undef
+                            unless $c =~ /^\s*keep-alive\s*/i;
+                    } else {
+                        $use_keepalive = undef;
+                    }
                 }
             }
             $buf = substr $buf, $reqlen;
+            my $chunked = do { no warnings; lc delete $env->{HTTP_TRANSFER_ENCODING} eq 'chunked' };
             if (my $cl = $env->{CONTENT_LENGTH}) {
                 my $buffer = Plack::TempBuffer->new($cl);
                 while ($cl > 0) {
@@ -567,9 +589,58 @@ sub handle_connection {
                     $cl -= length $chunk;
                 }
                 $env->{'psgi.input'} = $buffer->rewind;
+            }
+            elsif ($chunked) {
+                my $buffer = Plack::TempBuffer->new;
+                my $chunk_buffer = '';
+                my $length;
+                DECHUNK: while(1) {
+                    my $chunk;
+                    if ( length $buf ) {
+                        $chunk = $buf;
+                        $buf = '';
+                    }
+                    else {
+                        $self->read_timeout($conn, \$chunk, CHUNKSIZE, 0, $self->{timeout})
+                            or return;
+                    }
+
+                    $chunk_buffer .= $chunk;
+                    while ( $chunk_buffer =~ s/^(([0-9a-fA-F]+).*\015\012)// ) {
+                        my $trailer   = $1;
+                        my $chunk_len = hex $2;
+                        if ($chunk_len == 0) {
+                            last DECHUNK;
+                        } elsif (length $chunk_buffer < $chunk_len + 2) {
+                            $chunk_buffer = $trailer . $chunk_buffer;
+                            last;
+                        }
+                        $buf->print(substr $chunk_buffer, 0, $chunk_len, '');
+                        $chunk_buffer =~ s/^\015\012//;
+                        $length += $chunk_len;                        
+                    }
+                }
+                $env->{CONTENT_LENGTH} = $length;
+                $env->{'psgi.input'} = $buffer->rewind;
+                
             } else {
+                if ( $buf =~ m!^(?:GET|HEAD)! ) { #pipeline
+                    $pipelined_buf = $buf;
+                    $use_keepalive = 1;
+                } # else clear buffer
                 $env->{'psgi.input'} = $null_io;
             }
+
+            if ( $env->{HTTP_EXPECT} ) {
+                if ( $env->{HTTP_EXPECT} eq '100-continue' ) {
+                    $self->write_all($conn, "HTTP/1.1 100 Continue\015\012\015\012")
+                        or return;
+                } else {
+                    $res = [417,[ 'Content-Type' => 'text/plain' ], [ 'Expectation Failed' ] ];
+                    last;
+                }
+            }
+
             $res = Plack::Util::run_app $app, $env;
             last;
         }
@@ -582,16 +653,125 @@ sub handle_connection {
     }
 
     if (ref $res eq 'ARRAY') {
-        $self->_handle_response($res, $conn, \$use_keepalive);
+        $self->_handle_response($env, $res, $conn, \$use_keepalive);
     } elsif (ref $res eq 'CODE') {
         $res->(sub {
-            $self->_handle_response($_[0], $conn, \$use_keepalive);
+            $self->_handle_response($env, $_[0], $conn, \$use_keepalive);
         });
     } else {
         die "Bad response $res";
     }
 
-    return $use_keepalive;
+    return ($use_keepalive, $pipelined_buf);
 }
+
+sub _handle_response {
+    my($self, $env, $res, $conn, $use_keepalive_r) = @_;
+    my $protocol = $env->{SERVER_PROTOCOL};
+    my $status_code = $res->[0];
+    my $headers = $res->[1];
+    my $body = $res->[2];
+    
+    my @lines;
+    my %send_headers;
+    for (my $i = 0; $i < @$headers; $i += 2) {
+        my $k = $headers->[$i];
+        my $v = $headers->[$i + 1];
+        my $lck = lc $k;
+        if ($lck eq 'connection') {
+            $$use_keepalive_r = undef
+                if $$use_keepalive_r && lc $v ne 'keep-alive';
+        } else {
+            push @lines, "$k: $v\015\012";
+            $send_headers{$lck} = $v;
+        }
+    }
+    if ( ! exists $send_headers{server} ) {
+        unshift @lines, "Server: $self->{server_software}\015\012";
+    }
+    if ( ! exists $send_headers{date} ) {
+        unshift @lines, "Date: @{[HTTP::Date::time2str()]}\015\012";
+    }
+
+    # try to set content-length when keepalive can be used, or disable it
+    my $use_chunked;
+    if ($$use_keepalive_r) {
+        if (defined $send_headers{'content-length'}
+                || defined $send_headers{'transfer-encoding'}) {
+            # ok
+        } elsif ($protocol eq 'HTTP/1.0' && ! Plack::Util::status_with_no_entity_body($status_code)
+                    && defined(my $cl = Plack::Util::content_length($body))) {
+            push @lines, "Content-Length: $cl\015\012";
+        } elsif ( $protocol eq 'HTTP/1.1' && ! Plack::Util::status_with_no_entity_body($status_code) ) {
+            push @lines, "Transfer-Encodinf: chunked\015\012";
+            $use_chunked = 1;
+        } else {
+            $$use_keepalive_r = undef
+        }
+        push @lines, "Connection: keep-alive\015\012"
+            if $$use_keepalive_r;
+    }
+    unshift @lines, "HTTP/1.1 $status_code @{[ HTTP::Status::status_message($status_code) ]}\015\012";
+    push @lines, "\015\012";
+    
+    if (defined $body && ref $body eq 'ARRAY' && @$body == 1
+            && length $body->[0] < 8192) {
+        # combine response header and small request body
+        my $buf = $body->[0];
+        if ($use_chunked ) {
+            my $len = $buf;
+            $buf = sprintf("%x",$len) . "\015\012" . $buf . "\015\012" . '0' . "\015\012\015\012";
+        }
+        my $len = $self->write_all(
+            $conn, join('', @lines, $buf), $self->{timeout},
+        );
+        warn $! unless $len;
+        return;
+    }
+    $self->write_all($conn, join('', @lines), $self->{timeout})
+        or return;
+
+    if (defined $body) {
+        my $failed;
+        my $completed;
+        my $body_count = (ref $body eq 'ARRAY') ? $#{$body} + 1 : -1;
+        Plack::Util::foreach(
+            $body,
+            sub {
+                unless ($failed) {
+                    my $buf = $_[0];
+                    --$body_count;
+                    if ( $use_chunked ) {
+                        my $len = length $buf;
+                        return unless $len;
+                        $buf = sprintf("%x",$len) . "\015\012" . $buf . "\015\012";
+                        if ( $body_count == 0 ) {
+                            $buf .= '0' . "\015\012\015\012";
+                            $completed = 1;
+                        }
+                    }
+                    $self->write_all($conn, $buf, $self->{timeout})
+                        or $failed = 1;
+                }
+            },
+        );
+        $self->write_all($conn, '0' . "\015\012\015\012", $self->{timeout}) if $use_chunked && !$completed;
+    } else {
+        return Plack::Util::inline_object
+            write => sub {
+                my $buf = $_[0];
+                if ( $use_chunked ) {
+                    my $len = length $buf;
+                    return unless $len;
+                    $buf = sprintf("%x",$len) . "\015\012" . $buf . "\015\012"
+                }
+                $self->write_all($conn, $buf, $self->{timeout})
+            },
+            close => sub {
+                $self->write_all($conn, '0' . "\015\012\015\012", $self->{timeout}) if $use_chunked;
+            };
+    }
+}
+
 
 1;
