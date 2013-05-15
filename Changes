@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.09 2013-05-15T06:16:35Z
+
+  - support HTTP/1.1
+
 0.08 2013-05-13T16:49:17Z
 
   - read-forward next reqs/socket before select
