@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.10 2013-05-16T05:35:01Z
+
+  - refactoring around read-forward. Improve performance in < 10 connections.
+
 0.09 2013-05-15T06:16:35Z
 
   - support HTTP/1.1
