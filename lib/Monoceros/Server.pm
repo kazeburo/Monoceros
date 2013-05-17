@@ -379,9 +379,18 @@ sub request_worker {
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
+            $self->{wait_read} = {}; #fd => time
 
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
-                last if ( $self->{term_received} && !$next_conn);
+                last if ( $self->{term_received} && !$next_conn && $select->count <= scalar(keys  %sys_fileno) );
+                my $time = time;
+                foreach my $fd ( keys %{$self->{wait_read}} ) {
+                    if ( $time - $self->{wait_read}->{$fd} > $self->{keepalive_timeout} ) {
+                        delete $self->{wait_read}->{$fd};
+                        my ($fh) = grep { $_->fileno == $fd } $select->handles;
+                        $select->remove($fh);
+                    }
+                }
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #forward read or pipeline
                     $conn = $next_conn;
@@ -437,6 +446,7 @@ sub request_worker {
                         $self->keep_or_send($select, $conn);
                         next;
                     }
+                    next if defined $ret && $ret == 0; #close
                 }
 
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
@@ -469,23 +479,19 @@ sub request_worker {
                         $next_conn->{buf} = $buf;
                         next;
                     }
+                    elsif ( defined $ret && $ret == 0 ) {
+                        #closed?
+                        $self->{worker_pipe}->[WRITER]->syswrite("exit ".$conn->{md5}) unless $conn->{direct};
+                        next;
+                    }
                     $select->add($conn->{fh});
+                    $self->{wait_read}->{$conn->{fn}} = time;
                     $next_conn = $conn;
                     next;
                 }
 
                 # wait
                 $self->keep_or_send($select, $conn);
-            }
-
-            while (1) {
-                my @can_read = $select->can_read(1);
-                for (@can_read){
-                    if ( ! exists $sys_fileno{$_->fileno} ) {
-                        $select->remove($_);
-                    }
-                }
-                last if $select->count <= scalar(keys  %sys_fileno);
             }
             
         });
@@ -503,6 +509,7 @@ sub keep_or_send {
     my ($select, $conn) = @_;
     if ( $conn->{direct} ) {
         $select->add($conn->{fh});
+        $self->{wait_read}->{$conn->{fn}} = time;
         IO::FDPass::send($self->{defer_pipe}->[WRITER]->fileno, $conn->{fn});
     }
     else {
