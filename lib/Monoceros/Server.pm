@@ -8,7 +8,6 @@ use IO::Select;
 use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
-use AnyEvent::Socket;
 use AnyEvent::Util qw(fh_nonblocking);
 use Digest::MD5 qw/md5_hex/;
 use Time::HiRes qw/time/;
