@@ -276,7 +276,7 @@ sub connection_manager {
                 my $msg = 'ok';
                 my $off = 0;
                 while ( my $len = length($msg) - $off )  {
-                    my $ret = $self->write_aeio($sock, 'ok', $len, $off)
+                    my $ret = $self->write_aeio($sock, $msg, $len, $off)
                         or last;
                     $off += $ret;
                 };
@@ -428,9 +428,6 @@ sub request_worker {
                         if ( $next_conn && $_->fileno == $next_conn->{fn} ) {
                             $conn = $next_conn;
                         }
-                        if ( ! exists $sys_fileno{$_->fileno} ) {
-                            $self->{select}->remove($_);
-                        }
                     }
                     #forward read. but still cannot read
                     $self->keep_or_send($next_conn) if $next_conn && !$conn;
@@ -439,6 +436,7 @@ sub request_worker {
                     $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read )
                         unless $conn;
                 }
+                $self->{select}->remove($next_conn->{fh}) if $next_conn;
                 $next_conn = undef;
                 next unless $conn;
                 
@@ -538,13 +536,21 @@ sub cmd_to_mgr {
 sub keep_or_send {
     my ($self,$conn) = @_;
     if ( $conn->{direct} ) {
-        $self->{select}->add($conn->{fh});
         $self->cmd_to_mgr("send",$conn->{md5});
         my $ret;
         do {
             $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fn});
             die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK);
-        } while (!$ret);         
+        } while (!$ret);
+        my $buf = '';
+        my $to_read = 2;
+        local $self->{_is_deferred_accept} = 1;
+        while ( length $buf < 2 ) {
+            $self->read_timeout(
+                $self->{mgr_sock}, \$buf, $to_read - length $buf, length $buf,
+                $self->{timeout}
+            ) or return;
+        }
     }
     else {
         $self->cmd_to_mgr("keep",$conn->{md5});
