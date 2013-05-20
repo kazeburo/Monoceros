@@ -144,8 +144,8 @@ sub queued_fdsend {
                 next;
             }
             if ( ! IO::FDPass::send(fileno $self->{lstn_pipe}[WRITER], fileno $self->{fdsend_queue}[0][S_SOCK] ) ) {
-                return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 undef $self->{fdsend_worker};
+                return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 die "unable to pass file handle: $!"; 
             }
             shift @{$self->{fdsend_queue}};
@@ -394,7 +394,7 @@ sub request_worker {
             $self->{mgr_sock} = IO::Socket::UNIX->new(
                 Type => SOCK_STREAM,
                 Peer => $self->{worker_sock},
-            ) or die "[$$] $!";
+            ) or die "$!";
             $self->{mgr_sock}->blocking(0);
             
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
