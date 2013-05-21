@@ -26,7 +26,6 @@ use constant S_SOCK => 0;
 use constant S_TIME => 1;
 use constant S_REQS => 2;
 use constant S_IDLE => 3;
-use constant S_BUF => 4;
 
 use constant MAX_REQUEST_SIZE => 131072;
 use constant CHUNKSIZE    => 64 * 1024;
@@ -233,29 +232,11 @@ sub connection_manager {
                 return if length $buf < 37;
                 my $string = substr $buf, 0, 37, '';
 
-                #cmd
+                ## cmd
                 # send
                 my ($method,$remote) = split / /,$string, 2;
                 if ( $method eq 'send' ) {
                     $state = 'fd';
-                    return;
-                }
-
-                if ( $method eq 'recv' ) {
-                    my $buf = do {
-                        return unless exists $hash2fd{$remote};
-                        my $fd = $hash2fd{$remote};
-                        if ( ! exists $sockets{$fd} ) {
-                            delete $hash2fd{$remote};
-                            return;
-                        }
-                        my $sbuf = $sockets{$fd}->[S_BUF];
-                        $sockets{$fd}->[S_BUF]='';
-                        $sbuf;
-                    };
-                    $buf = '' if ! defined $buf;
-                    my $msg = sprintf("%x",length $buf) . "\015\012" . $buf . "\015\012" . '0' . "\015\012\015\012";
-                    $self->write_all_aeio($sock, $msg, $self->{timeout});
                     return;
                 }
 
@@ -273,15 +254,8 @@ sub connection_manager {
                     $sockets{$fd}->[S_TIME] = time; #time
                     $sockets{$fd}->[S_REQS]++; #reqs
                     $sockets{$fd}->[S_IDLE] = 1; #idle
-                    $sockets{$fd}->[S_BUF] = '';
                     $wait_read{$fd} = AE::io $sockets{$fd}->[S_SOCK], 0, sub {
                         undef $wait_read{$fd};
-                        my $ret = $sockets{$fd}->[S_SOCK]->sysread(my $buf, MAX_REQUEST_SIZE);
-                        if ( !$ret ) {
-                            delete $sockets{$fd};
-                            return;
-                        }
-                        $sockets{$fd}->[S_BUF] = $buf;
                         $self->queued_fdsend($sockets{$fd});
                     };
                 }
@@ -299,16 +273,10 @@ sub connection_manager {
                 my $peername = $fh->peername;
                 return unless $peername;
                 my $remote = md5_hex($peername);
-                $sockets{$fd} = [$fh,time,1,1,''];  #fh,time,reqs,idle,buf
+                $sockets{$fd} = [$fh,time,1,1];  #fh,time,reqs,idle,buf
                 $hash2fd{$remote} = $fd;
                 $wait_read{$fd} = AE::io $sockets{$fd}->[S_SOCK], 0, sub {
                     undef $wait_read{$fd};
-                    my $ret = $sockets{$fd}->[S_SOCK]->sysread(my $buf, MAX_REQUEST_SIZE);
-                    if ( !$ret ) {
-                        delete $sockets{$fd};
-                        return;
-                    }
-                    $sockets{$fd}->[S_BUF] = $buf;
                     $self->queued_fdsend($sockets{$fd});
                 };
             } # cmd
@@ -324,7 +292,7 @@ sub connection_manager {
                 next unless $fh;
                 my $fd = $fh->fileno;
                 my $remote = md5_hex($peer);
-                $sockets{$fd} = [$fh,time,0,1,''];  #fh,time,reqs,idle,buf
+                $sockets{$fd} = [$fh,time,0,1];  #fh,time,reqs,idle,buf
                 $hash2fd{$remote} = $fd;
                 fh_nonblocking $fh, 1
                     or die "failed to set socket to nonblocking mode:$!";
@@ -332,12 +300,6 @@ sub connection_manager {
                     or die "setsockopt(TCP_NODELAY) failed:$!";
                 $wait_read{$fd} = AE::io $fh, 0, sub {
                     undef $wait_read{$fd};
-                    my $ret = $sockets{$fd}->[S_SOCK]->sysread(my $buf, MAX_REQUEST_SIZE);
-                    if ( !$ret ) {
-                        delete $sockets{$fd};
-                        return;
-                    }
-                    $sockets{$fd}->[S_BUF] = $buf;
                     $self->queued_fdsend($sockets{$fd});
                 };
             }
@@ -503,10 +465,6 @@ sub request_worker {
                     }
                     next if defined $ret && $ret == 0; #close
                 }
-                else {
-                    $prebuf = $self->cmd_recvbuf($conn->{md5});
-                }
-
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
                 $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept});
@@ -588,34 +546,6 @@ sub keep_or_send {
     else {
         $self->cmd_to_mgr("keep",$conn->{md5});
     }
-}
-
-sub cmd_recvbuf {
-    my $self = shift;
-    my $md5 = shift;
-    $self->cmd_to_mgr("recv",$md5);
-    my $buffer = '';
-    my $chunk_buffer = '';
-    local $self->{_is_deferred_accept} = 1; #ready to read
- BUF_DECHUNK: while(1) {
-        my $chunk;
-        $self->read_timeout($self->{mgr_sock}, \$chunk, MAX_REQUEST_SIZE, 0, $self->{timeout})
-            or return;
-        $chunk_buffer .= $chunk;
-        while ( $chunk_buffer =~ s/^(([0-9a-fA-F]+).*\015\012)// ) {
-            my $trailer   = $1;
-                        my $chunk_len = hex $2;
-            if ($chunk_len == 0) {
-                last BUF_DECHUNK;
-            } elsif (length $chunk_buffer < $chunk_len + 2) {
-                $chunk_buffer = $trailer . $chunk_buffer;
-                last;
-            }
-            $buffer .= substr $chunk_buffer, 0, $chunk_len, '';
-            $chunk_buffer =~ s/^\015\012//;
-        }
-    }
-    return $buffer;
 }
 
 sub accept_or_recv {
