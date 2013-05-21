@@ -30,6 +30,8 @@ use constant S_IDLE => 3;
 use constant MAX_REQUEST_SIZE => 131072;
 use constant CHUNKSIZE    => 64 * 1024;
 
+use constant DEBUG        => $ENV{MONOCEROS_DEBUG} || 0;
+
 my $null_io = do { open my $io, "<", \""; $io };
 
 sub new {
@@ -131,28 +133,34 @@ sub run_workers {
 
 sub queued_fdsend {
     my $self = shift;
-    my $info = shift;
+    my $fd = shift;
 
-    $info->[S_IDLE] = 0; #no-idle
+    if ( ! exists $self->{sockets}{$fd} ) {
+        return;
+    }
+    $self->{sockets}{$fd}[S_IDLE] = 0;
 
-    $self->{fdsend_queue} ||= [];
-    push @{$self->{fdsend_queue}},  $info;
+    push @{$self->{fdsend_queue}},  $fd;
     $self->{fdsend_worker} ||= AE::io $self->{lstn_pipe}[WRITER], 1, sub {
-        do {
-            if ( !$self->{fdsend_queue}[0][S_SOCK] ) {
-                shift @{$self->{fdsend_queue}};
+        while ( my $fd = shift @{$self->{fdsend_queue}} ) {
+            if ( ! exists $self->{sockets}{$fd}  ) {
                 next;
             }
-            if ( ! IO::FDPass::send(fileno $self->{lstn_pipe}[WRITER], fileno $self->{fdsend_queue}[0][S_SOCK] ) ) {
-                undef $self->{fdsend_worker};
-                return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                die "unable to pass file handle: $!"; 
+            if ( !$self->{sockets}{$fd}[S_SOCK] || !$self->{sockets}{$fd}[S_SOCK]->connected ) {
+                delete $self->{sockets}{$fd};
+                next;
             }
-            shift @{$self->{fdsend_queue}};
-        } while @{$self->{fdsend_queue}};
+            if ( ! IO::FDPass::send(fileno $self->{lstn_pipe}[WRITER], $fd ) ) {
+                if ( $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK ) {
+                    unshift @{$self->{fdsend_queue}}, $fd;
+                    return;
+                }
+                die "unable to pass file handle: $!"; 
+                undef $self->{fdsend_worker};
+            }
+        } 
         undef $self->{fdsend_worker};
     };
-
     1;
 }
 
@@ -164,10 +172,11 @@ sub connection_manager {
     fh_nonblocking $self->{listen_sock}, 1;
 
     my %manager;
-    my %sockets;
     my %hash2fd;
     my %wait_read;
     my $term_received = 0;
+    $self->{sockets} = {};
+    $self->{fdsend_queue} = [];
 
     my $cv = AE::cv;
     my $close_all = 0;
@@ -189,7 +198,7 @@ sub connection_manager {
         kill 'USR1', $worker_pid; #stop accept
         my $t;$t = AE::timer 0, 1, sub {
             my $time = time;
-            return if keys %sockets;
+            return if keys %{$self->{sockets}};
             undef $t;
             $close_all=1;
         };
@@ -197,24 +206,32 @@ sub connection_manager {
 
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
-        for my $key ( keys %sockets ) { #key = fd
-            if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{timeout}
-                     && (!$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected()) ) {
+        if ( DEBUG ) {
+            my $total = scalar keys %{$self->{sockets}};
+            my $queued = scalar @{$self->{fdsend_queue}};
+            my $active = scalar grep { !$self->{sockets}{$_}[S_IDLE] } keys %{$self->{sockets}};
+            my $idle = scalar grep { $self->{sockets}{$_}[S_IDLE] } keys %{$self->{sockets}};
+            warn "queue: $queued | total: $total | active: $active | idle: $idle";
+        }
+        for my $key ( keys %{$self->{sockets}} ) { #key = fd
+            if ( ! $self->{sockets}{$key}[S_IDLE] && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout}
+                     && (!$self->{sockets}{$key}[S_SOCK] || !$self->{sockets}{$key}[S_SOCK]->connected()) ) {
                 delete $wait_read{$key};
-                delete $sockets{$key};
+                delete $self->{sockets}{$key};
             }
-            elsif ( $sockets{$key}->[S_IDLE] && $sockets{$key}->[S_REQS] == 0 
-                     && $time - $sockets{$key}->[1] > $self->{timeout} ) { #idle && first req 
+            elsif ( $self->{sockets}{$key}[S_IDLE] && $self->{sockets}{$key}[S_REQS] == 0 
+                     && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout} ) { #idle && first req 
                 delete $wait_read{$key};
-                delete $sockets{$key};
+                delete $self->{sockets}{$key};
             }
-            elsif ( $sockets{$key}->[S_IDLE] && $sockets{$key}->[S_REQS] > 0 &&
-                     $time - $sockets{$key}->[1] > $self->{keepalive_timeout} ) { #idle && keepalive
+            elsif ( $self->{sockets}{$key}[S_IDLE] && $self->{sockets}{$key}[S_REQS] > 0 &&
+                     $time - $self->{sockets}{$key}[S_TIME] > $self->{keepalive_timeout} ) { #idle && keepalive
                 delete $wait_read{$key};
-                delete $sockets{$key};
+                delete $self->{sockets}{$key};
             }
         }
     };
+
 
 
     $manager{internal_server} = AE::io $self->{internal_server}, 0, sub {
@@ -242,21 +259,22 @@ sub connection_manager {
 
                 return unless exists $hash2fd{$remote};
                 my $fd = $hash2fd{$remote};
-                if ( ! exists $sockets{$fd} ) {
+                if ( ! exists $self->{sockets}{$fd} ) {
                     delete $hash2fd{$remote};
                     return;
                 }
 
                 if ( $method eq 'exit' ) { # exit
+                    $self->{sockets}{$fd}[S_IDLE] = 1;
                     delete $hash2fd{$remote};
-                    delete $sockets{$fd};
+                    delete $self->{sockets}{$fd};
                 } elsif ( $method eq 'keep') { #keep
-                    $sockets{$fd}->[S_TIME] = time; #time
-                    $sockets{$fd}->[S_REQS]++; #reqs
-                    $sockets{$fd}->[S_IDLE] = 1; #idle
-                    $wait_read{$fd} = AE::io $sockets{$fd}->[S_SOCK], 0, sub {
-                        undef $wait_read{$fd};
-                        $self->queued_fdsend($sockets{$fd});
+                    $self->{sockets}{$fd}[S_TIME] = time; #time
+                    $self->{sockets}{$fd}[S_REQS]++; #reqs
+                    $self->{sockets}{$fd}[S_IDLE] = 1; #idle
+                    $wait_read{$fd} = AE::io $self->{sockets}{$fd}[S_SOCK], 0, sub {
+                        delete $wait_read{$fd};
+                        $self->queued_fdsend($fd);
                     };
                 }
             }
@@ -264,20 +282,21 @@ sub connection_manager {
                 my $fd = IO::FDPass::recv(fileno $sock);
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 $state = 'cmd';
-
+                
                 return if $fd < 0;
+                
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
-                $self->write_all_aeio($sock, "OK", $self->{timeout});
+                $self->write_all_aeio($sock, "OK", $self->{keepalive_timeout});
 
                 my $peername = $fh->peername;
                 return unless $peername;
                 my $remote = md5_hex($peername);
-                $sockets{$fd} = [$fh,time,1,1];  #fh,time,reqs,idle,buf
+                $self->{sockets}{$fd} = [$fh,time,1,1];  #fh,time,reqs,idle,buf
                 $hash2fd{$remote} = $fd;
-                $wait_read{$fd} = AE::io $sockets{$fd}->[S_SOCK], 0, sub {
-                    undef $wait_read{$fd};
-                    $self->queued_fdsend($sockets{$fd});
+                $wait_read{$fd} = AE::io $self->{sockets}{$fd}[S_SOCK], 0, sub {
+                    delete $wait_read{$fd};
+                    $self->queued_fdsend($fd);
                 };
             } # cmd
         } # AE::io
@@ -292,15 +311,15 @@ sub connection_manager {
                 next unless $fh;
                 my $fd = $fh->fileno;
                 my $remote = md5_hex($peer);
-                $sockets{$fd} = [$fh,time,0,1];  #fh,time,reqs,idle,buf
+                $self->{sockets}{$fd} = [$fh,time,0,1];  #fh,time,reqs,idle,buf
                 $hash2fd{$remote} = $fd;
                 fh_nonblocking $fh, 1
                     or die "failed to set socket to nonblocking mode:$!";
                 setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                     or die "setsockopt(TCP_NODELAY) failed:$!";
                 $wait_read{$fd} = AE::io $fh, 0, sub {
-                    undef $wait_read{$fd};
-                    $self->queued_fdsend($sockets{$fd});
+                    delete $wait_read{$fd};
+                    $self->queued_fdsend($fd);
                 };
             }
         };
@@ -456,14 +475,18 @@ sub request_worker {
                 if ( exists $conn->{buf} ) {
                     $prebuf = delete $conn->{buf};
                 }
-                elsif ( $conn->{direct} ) {
-                    #pre-read for defered sock
+                else {
+                    #pre-read
                     my $ret = $conn->{fh}->sysread($prebuf, MAX_REQUEST_SIZE);
                     if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) ) {
                         $self->keep_or_send($conn);
                         next;
                     }
-                    next if defined $ret && $ret == 0; #close
+                    elsif ( defined $ret && $ret == 0 ) {
+                        #closed?
+                        $self->cmd_to_mgr("exit", $conn->{md5}) unless $conn->{direct};
+                        next;
+                    }
                 }
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
