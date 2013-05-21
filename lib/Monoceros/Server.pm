@@ -16,7 +16,7 @@ use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
-use Socket qw(IPPROTO_TCP TCP_NODELAY);
+use Socket qw(IPPROTO_TCP TCP_NODELAY SOL_SOCKET SO_KEEPALIVE TCP_KEEPIDLE TCP_KEEPINTVL TCP_KEEPCNT);
 use File::Temp qw/tempfile/;
 
 use constant WRITER => 0;
@@ -26,9 +26,11 @@ use constant S_SOCK => 0;
 use constant S_TIME => 1;
 use constant S_REQS => 2;
 use constant S_IDLE => 3;
+use constant S_BUF => 4;
 
 use constant MAX_REQUEST_SIZE => 131072;
 use constant CHUNKSIZE    => 64 * 1024;
+
 my $null_io = do { open my $io, "<", \""; $io };
 
 sub new {
@@ -196,6 +198,11 @@ sub connection_manager {
 
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
+#my $idle = scalar grep { $sockets{$_}->[S_IDLE] } keys %sockets;
+#my $active = scalar grep { !$sockets{$_}->[S_IDLE] } keys %sockets;
+#$self->{fdsend_queue} ||= [];
+#my $queue = @{$self->{fdsend_queue}};
+#warn "idle: $idle / active: $active / queue: $queue";
         for my $key ( keys %sockets ) { #key = fd
             if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout}
                      && (!$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected()) ) {
@@ -239,6 +246,24 @@ sub connection_manager {
                     return;
                 }
 
+                if ( $method eq 'recv' ) {
+                    my $buf = do {
+                        return unless exists $hash2fd{$remote};
+                        my $fd = $hash2fd{$remote};
+                        if ( ! exists $sockets{$fd} ) {
+                            delete $hash2fd{$remote};
+                            return;
+                        }
+                        my $sbuf = $sockets{$fd}->[S_BUF];
+                        $sockets{$fd}->[S_BUF]='';
+                        $sbuf;
+                    };
+                    $buf = '' if ! defined $buf;
+                    my $msg = sprintf("%x",length $buf) . "\015\012" . $buf . "\015\012" . '0' . "\015\012\015\012";
+                    $self->write_all_aeio($sock, $msg, $self->{timeout});
+                    return;
+                }
+
                 return unless exists $hash2fd{$remote};
                 my $fd = $hash2fd{$remote};
                 if ( ! exists $sockets{$fd} ) {
@@ -253,12 +278,15 @@ sub connection_manager {
                     $sockets{$fd}->[S_TIME] = time; #time
                     $sockets{$fd}->[S_REQS]++; #reqs
                     $sockets{$fd}->[S_IDLE] = 1; #idle
+                    $sockets{$fd}->[S_BUF] = '';
                     $wait_read{$fd} = AE::io $sockets{$fd}->[S_SOCK], 0, sub {
                         undef $wait_read{$fd};
-                        if ( !$sockets{$fd}->[S_SOCK] || !$sockets{$fd}->[S_SOCK]->connected()) {
+                        my $ret = $sockets{$fd}->[S_SOCK]->sysread(my $buf, MAX_REQUEST_SIZE);
+                        if ( !$ret ) {
                             delete $sockets{$fd};
                             return;
                         }
+                        $sockets{$fd}->[S_BUF] = $buf;
                         $self->queued_fdsend($sockets{$fd});
                     };
                 }
@@ -271,26 +299,21 @@ sub connection_manager {
                 return if $fd < 0;
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
-
-                my $msg = 'ok';
-                my $off = 0;
-                while ( my $len = length($msg) - $off )  {
-                    my $ret = $self->write_aeio($sock, $msg, $len, $off)
-                        or last;
-                    $off += $ret;
-                };
+                $self->write_all_aeio($sock, "OK", $self->{timeout});
 
                 my $peername = $fh->peername;
                 return unless $peername;
                 my $remote = md5_hex($peername);
-                $sockets{$fd} = [$fh,time,1,1];  #fh,time,reqs,idle
+                $sockets{$fd} = [$fh,time,1,1,''];  #fh,time,reqs,idle,buf
                 $hash2fd{$remote} = $fd;
                 $wait_read{$fd} = AE::io $sockets{$fd}->[S_SOCK], 0, sub {
                     undef $wait_read{$fd};
-                    if ( !$sockets{$fd}->[S_SOCK] || !$sockets{$fd}->[S_SOCK]->connected()) {
+                    my $ret = $sockets{$fd}->[S_SOCK]->sysread(my $buf, MAX_REQUEST_SIZE);
+                    if ( !$ret ) {
                         delete $sockets{$fd};
                         return;
                     }
+                    $sockets{$fd}->[S_BUF] = $buf;
                     $self->queued_fdsend($sockets{$fd});
                 };
             } # cmd
@@ -306,7 +329,7 @@ sub connection_manager {
                 next unless $fh;
                 my $fd = $fh->fileno;
                 my $remote = md5_hex($peer);
-                $sockets{$fd} = [$fh,time,0,1];  #fh,time,reqs,idle
+                $sockets{$fd} = [$fh,time,0,1,''];  #fh,time,reqs,idle,buf
                 $hash2fd{$remote} = $fd;
                 fh_nonblocking $fh, 1
                     or die "failed to set socket to nonblocking mode:$!";
@@ -314,10 +337,12 @@ sub connection_manager {
                     or die "setsockopt(TCP_NODELAY) failed:$!";
                 $wait_read{$fd} = AE::io $fh, 0, sub {
                     undef $wait_read{$fd};
-                    if ( !$sockets{$fd}->[S_SOCK] || !$sockets{$fd}->[S_SOCK]->connected()) {
+                    my $ret = $sockets{$fd}->[S_SOCK]->sysread(my $buf, MAX_REQUEST_SIZE);
+                    if ( !$ret ) {
                         delete $sockets{$fd};
                         return;
                     }
+                    $sockets{$fd}->[S_BUF] = $buf;
                     $self->queued_fdsend($sockets{$fd});
                 };
             }
@@ -330,16 +355,16 @@ sub connection_manager {
 sub write_aeio {
     my ($self, $sock, $msg, $len, $off, $timeout) = @_;
  DO_WRITE:
-    my $ret = syswrite( $sock, $msg, $len, $off);
+    my $ret = syswrite($sock, $msg, $len, $off);
     return $ret if $ret;
     return if ( ! defined $ret 
                     && ($! != EINTR && $! != EAGAIN || $! != EWOULDBLOCK) );
     my $wcv = AE::cv;
-    my $wo; $wo = AE::io $sock , 1, sub {
+    my $wo; $wo = AE::io $sock, 1, sub {
         undef $wo;
         $wcv->send(1);
     };
-    my $wt; $wt = AE::timer 0, $self->{timeout}, sub {
+    my $wt; $wt = AE::timer 0, $timeout, sub {
         undef $wo;
         undef $wt;
         $wcv->send(1);
@@ -347,6 +372,17 @@ sub write_aeio {
     my $can_read = $wcv->recv();
     return unless $can_read;
     goto DO_WRITE;
+}
+
+sub write_all_aeio {
+    my ($self, $sock, $msg, $timeout) = @_;
+    my $off = 0;
+    while ( my $len = length($msg) - $off )  {
+        my $ret = $self->write_aeio($sock, $msg, $len, $off, $timeout)
+            or last;
+        $off += $ret;
+    }
+    return length($msg);
 }
 
 sub request_worker {
@@ -584,13 +620,37 @@ sub accept_or_recv {
                     or die "unable to convert file descriptor to handle: $!";
                 my $peer = $fh->peername;
                 next unless $peer;
+                my $md5 = md5_hex($peer);
+                $self->cmd_to_mgr("recv",$md5);
+                my $buffer = '';
+                my $chunk_buffer = '';
+                DECHUNK: while(1) {
+                    my $chunk;
+                    $self->read_timeout($self->{mgr_sock}, \$chunk, MAX_REQUEST_SIZE, 0, $self->{timeout})
+                            or return;
+                    $chunk_buffer .= $chunk;
+                    while ( $chunk_buffer =~ s/^(([0-9a-fA-F]+).*\015\012)// ) {
+                        my $trailer   = $1;
+                        my $chunk_len = hex $2;
+                        if ($chunk_len == 0) {
+                            last DECHUNK;
+                        } elsif (length $chunk_buffer < $chunk_len + 2) {
+                            $chunk_buffer = $trailer . $chunk_buffer;
+                            last;
+                        }
+                        $buffer .= substr $chunk_buffer, 0, $chunk_len, '';
+                        $chunk_buffer =~ s/^\015\012//;
+                    }
+                }
+                
                 $conn = {
                     fh => $fh,
                     fn => $fh->fileno,
                     peername => $peer,
-                    md5 => md5_hex($peer),
+                    md5 => $md5,
                     direct => 0,
                     reqs => 0,
+                    buf => $buffer,
                 };
                 last;
             }
