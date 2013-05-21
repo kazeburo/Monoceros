@@ -16,7 +16,7 @@ use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
-use Socket qw(IPPROTO_TCP TCP_NODELAY SOL_SOCKET SO_KEEPALIVE TCP_KEEPIDLE TCP_KEEPINTVL TCP_KEEPCNT);
+use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 
 use constant WRITER => 0;
@@ -198,13 +198,8 @@ sub connection_manager {
 
     $manager{disconnect_keepalive_timeout} = AE::timer 0, 1, sub {
         my $time = time;
-#my $idle = scalar grep { $sockets{$_}->[S_IDLE] } keys %sockets;
-#my $active = scalar grep { !$sockets{$_}->[S_IDLE] } keys %sockets;
-#$self->{fdsend_queue} ||= [];
-#my $queue = @{$self->{fdsend_queue}};
-#warn "idle: $idle / active: $active / queue: $queue";
         for my $key ( keys %sockets ) { #key = fd
-            if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{keepalive_timeout}
+            if ( !$sockets{$key}->[S_IDLE] && $time - $sockets{$key}->[1] > $self->{timeout}
                      && (!$sockets{$key}->[S_SOCK] || !$sockets{$key}->[S_SOCK]->connected()) ) {
                 delete $wait_read{$key};
                 delete $sockets{$key};
@@ -508,6 +503,9 @@ sub request_worker {
                     }
                     next if defined $ret && $ret == 0; #close
                 }
+                else {
+                    $prebuf = $self->cmd_recvbuf($conn->{md5});
+                }
 
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
@@ -592,6 +590,34 @@ sub keep_or_send {
     }
 }
 
+sub cmd_recvbuf {
+    my $self = shift;
+    my $md5 = shift;
+    $self->cmd_to_mgr("recv",$md5);
+    my $buffer = '';
+    my $chunk_buffer = '';
+    local $self->{_is_deferred_accept} = 1; #ready to read
+ BUF_DECHUNK: while(1) {
+        my $chunk;
+        $self->read_timeout($self->{mgr_sock}, \$chunk, MAX_REQUEST_SIZE, 0, $self->{timeout})
+            or return;
+        $chunk_buffer .= $chunk;
+        while ( $chunk_buffer =~ s/^(([0-9a-fA-F]+).*\015\012)// ) {
+            my $trailer   = $1;
+                        my $chunk_len = hex $2;
+            if ($chunk_len == 0) {
+                last BUF_DECHUNK;
+            } elsif (length $chunk_buffer < $chunk_len + 2) {
+                $chunk_buffer = $trailer . $chunk_buffer;
+                last;
+            }
+            $buffer .= substr $chunk_buffer, 0, $chunk_len, '';
+            $chunk_buffer =~ s/^\015\012//;
+        }
+    }
+    return $buffer;
+}
+
 sub accept_or_recv {
     my $self = shift;
     my @for_read = @_;
@@ -620,37 +646,13 @@ sub accept_or_recv {
                     or die "unable to convert file descriptor to handle: $!";
                 my $peer = $fh->peername;
                 next unless $peer;
-                my $md5 = md5_hex($peer);
-                $self->cmd_to_mgr("recv",$md5);
-                my $buffer = '';
-                my $chunk_buffer = '';
-                DECHUNK: while(1) {
-                    my $chunk;
-                    $self->read_timeout($self->{mgr_sock}, \$chunk, MAX_REQUEST_SIZE, 0, $self->{timeout})
-                            or return;
-                    $chunk_buffer .= $chunk;
-                    while ( $chunk_buffer =~ s/^(([0-9a-fA-F]+).*\015\012)// ) {
-                        my $trailer   = $1;
-                        my $chunk_len = hex $2;
-                        if ($chunk_len == 0) {
-                            last DECHUNK;
-                        } elsif (length $chunk_buffer < $chunk_len + 2) {
-                            $chunk_buffer = $trailer . $chunk_buffer;
-                            last;
-                        }
-                        $buffer .= substr $chunk_buffer, 0, $chunk_len, '';
-                        $chunk_buffer =~ s/^\015\012//;
-                    }
-                }
-                
                 $conn = {
                     fh => $fh,
                     fn => $fh->fileno,
                     peername => $peer,
-                    md5 => $md5,
+                    md5 => md5_hex($peer),
                     direct => 0,
                     reqs => 0,
-                    buf => $buffer,
                 };
                 last;
             }
