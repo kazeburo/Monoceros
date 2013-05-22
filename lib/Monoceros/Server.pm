@@ -253,10 +253,16 @@ sub connection_manager {
                 }
                 return if length $buf < 37;
                 my $string = substr $buf, 0, 37, '';
+                my ($method,$remote) = split / /,$string, 2;
 
                 ## cmd
+                # stat
+                if ( $method eq 'stat' ) {
+                    my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NP';
+                    $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
+                    return;
+                }                
                 # send
-                my ($method,$remote) = split / /,$string, 2;
                 if ( $method eq 'send' ) {
                     $state = 'fd';
                     return;
@@ -289,16 +295,14 @@ sub connection_manager {
                 $state = 'cmd';
                 
                 if ( $fd < 0 ) {
-                    warn sprintf '%s (%d)', $!, $!;
+                    warn sprintf 'Failed recv fd: %s (%d)', $!, $!;
                     $self->write_all_aeio($sock, "NG", $self->{keepalive_timeout});
-                    undef $ws;
                     return;
                 }
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+');
                 if ( !$fh ) {
                     warn "unable to convert file descriptor to handle: $!";
                     $self->write_all_aeio($sock, "NG", $self->{keepalive_timeout});
-                    undef $ws;
                     return;
                 }
                 my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NP';
@@ -392,6 +396,9 @@ sub request_worker {
                 Type => SOCK_STREAM,
                 Peer => $self->{worker_sock},
             ) or die "$!";
+            $self->{mgr_sock}->syswrite("stat "."x"x32, 37);
+            $self->{mgr_sock}->sysread(my $buf, 2);
+           $self->{stop_keepalive} = ($buf && $buf eq 'OK') ? 0 : time + $self->{keepalive_timeout} + 1; 
             $self->{mgr_sock}->blocking(0);
             
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
