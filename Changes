@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.13 2013-05-22T06:16:38Z
+
+  - add max-keepalive-connection option
+
 0.12 2013-05-20T07:25:35Z
 
   - refactoring worker->manager socket passing
