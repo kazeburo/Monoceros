@@ -62,12 +62,15 @@ sub new {
             if defined $args{$_};
     }
 
+    my $open_max = eval { POSIX::sysconf (POSIX::_SC_OPEN_MAX ()) - 1 } || 1023;
+
     my $self = bless {
         host                 => $args{host} || 0,
         port                 => $args{port} || 8080,
         max_workers          => $max_workers,
         timeout              => $args{timeout} || 300,
         keepalive_timeout    => $args{keepalive_timeout} || 10,
+        max_keepalive_connection => $args{max_keepalive_connection} || int($open_max/2),
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
         min_reqs_per_child   => (
@@ -180,10 +183,8 @@ sub connection_manager {
     $self->{sockets} = {};
     $self->{fdsend_queue} = [];
 
-    my $open_max = eval { POSIX::sysconf (POSIX::_SC_OPEN_MAX ()) - 1 } || 1023;
-    my $opened = scalar grep { POSIX::fstat($_) } (0..$open_max);
-    $self->{max_keepalive_connection} = $open_max - $opened - ( $self->{max_workers} * 4 );
     warn sprintf "Set max_keepalive_connection to %s", $self->{max_keepalive_connection} if DEBUG;
+
     my $cv = AE::cv;
     my $close_all = 0;
     my $sig2;$sig2 = AE::signal 'USR1', sub {
@@ -284,16 +285,22 @@ sub connection_manager {
             }
             elsif ( $state eq 'fd' ) {
                 my $fd = IO::FDPass::recv(fileno $sock);
-                warn sprintf '%s (%d)', $!, $! if $fd < 0 && ! exists $ok_recv_errno{$!+0};
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 $state = 'cmd';
                 
                 if ( $fd < 0 ) {
+                    warn sprintf '%s (%d)', $!, $!;
                     $self->write_all_aeio($sock, "NG", $self->{keepalive_timeout});
+                    undef $ws;
                     return;
                 }
-                my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
-                    or die "unable to convert file descriptor to handle: $!";
+                my $fh = IO::Socket::INET->new_from_fd($fd,'r+');
+                if ( !$fh ) {
+                    warn "unable to convert file descriptor to handle: $!";
+                    $self->write_all_aeio($sock, "NG", $self->{keepalive_timeout});
+                    undef $ws;
+                    return;
+                }
                 my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NP';
                 $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
 

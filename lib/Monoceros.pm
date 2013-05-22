@@ -76,6 +76,10 @@ max. number of requests to be handled before a worker process exits (default: 10
 
 if set, randomizes the number of requests handled by a single worker process between the value and that supplied by C<--max-reqs-per-chlid> (default: none)
 
+=head2 --max-keepalive-connection=#
+
+number of connections to keep in the manager process. If you want to increase this value, You should check your system limitations. (default: half number of POSIX::_SC_OPEN_MAX)
+
 =head1 RECOMMENDED MODULES
 
 For more performance. I recommends you to install these module.
