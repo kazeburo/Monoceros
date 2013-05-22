@@ -254,16 +254,19 @@ sub connection_manager {
                 return if length $buf < 37;
                 my $string = substr $buf, 0, 37, '';
                 my ($method,$remote) = split / /,$string, 2;
-
+                
                 ## cmd
+                
                 # stat
                 if ( $method eq 'stat' ) {
-                    my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NP';
+                    my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NG';
                     $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
                     return;
                 }                
                 # send
                 if ( $method eq 'send' ) {
+                    my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NG';
+                    $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
                     $state = 'fd';
                     return;
                 }
@@ -291,22 +294,18 @@ sub connection_manager {
             }
             elsif ( $state eq 'fd' ) {
                 my $fd = IO::FDPass::recv(fileno $sock);
-                return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 $state = 'cmd';
                 
                 if ( $fd < 0 ) {
                     warn sprintf 'Failed recv fd: %s (%d)', $!, $!;
-                    $self->write_all_aeio($sock, "NG", $self->{keepalive_timeout});
                     return;
                 }
+
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+');
                 if ( !$fh ) {
                     warn "unable to convert file descriptor to handle: $!";
-                    $self->write_all_aeio($sock, "NG", $self->{keepalive_timeout});
                     return;
                 }
-                my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NP';
-                $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
 
                 my $peername = $fh->peername;
                 return unless $peername;
@@ -396,17 +395,24 @@ sub request_worker {
                 Type => SOCK_STREAM,
                 Peer => $self->{worker_sock},
             ) or die "$!";
-            $self->{mgr_sock}->syswrite("stat "."x"x32, 37);
-            $self->{mgr_sock}->sysread(my $buf, 2);
-           $self->{stop_keepalive} = ($buf && $buf eq 'OK') ? 0 : time + $self->{keepalive_timeout} + 1; 
             $self->{mgr_sock}->blocking(0);
             
+            $self->cmd_to_mgr("stat",'x'x32);
+            my $buf = '';
+            my $to_read = 2;
+            while ( length $buf < $to_read ) {
+                $self->read_timeout(
+                    $self->{mgr_sock}, \$buf, $to_read - length $buf, length $buf,
+                    $self->{timeout}
+                ) or last;
+            }
+            $self->{stop_keepalive} = ($buf && $buf eq 'OK') ? 0 : time + $self->{keepalive_timeout} + 1;
+
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
             my $proc_req_count = 0;
             
             $self->{term_received} = 0;
             $self->{stop_accept} = 0;
-            $self->{stop_keepalive} = 0;
             local $SIG{TERM} = sub {
                 $self->{term_received}++;
                 exit 0 if $self->{term_received} > 1;
@@ -472,8 +478,7 @@ sub request_worker {
                 else {
                     #pre-read
                     my $ret = $conn->{fh}->sysread($prebuf, MAX_REQUEST_SIZE);
-                    if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) 
-                             && !$self->{stop_keepalive} ) {
+                    if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) ) {
                         $self->keep_or_send($conn);
                         next;
                     }
@@ -485,8 +490,8 @@ sub request_worker {
                 }
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
-                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept} || 
-                                           ($self->{stop_keepalive} > time && $conn->{direct} ));
+                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept} || !$conn->{can_keepalive});
+
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 
@@ -546,22 +551,21 @@ sub keep_or_send {
     my ($self,$conn) = @_;
     if ( $conn->{direct} ) {
         $self->cmd_to_mgr("send",$conn->{md5});
-        my $ret;
-        do {
-            $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fn});
-            die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK);
-        } while (!$ret);
         my $buf = '';
         my $to_read = 2;
-        $self->{_is_deferred_accept} = 1;
-        while ( length $buf < 2 ) {
+        while ( length $buf < $to_read ) {
             $self->read_timeout(
                 $self->{mgr_sock}, \$buf, $to_read - length $buf, length $buf,
                 $self->{timeout}
             ) or last;
         }
         $self->{stop_keepalive} = ($buf && $buf eq 'OK') ? 0 : time + $self->{keepalive_timeout} + 1;
-        warn "stop keepalive_mode until ".$self->{stop_keepalive} if DEBUG && $self->{stop_keepalive} ;
+
+        my $ret;
+        do {
+            $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fn});
+            die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK);
+        } while (!$ret);
     }
     else {
         $self->cmd_to_mgr("keep",$conn->{md5});
@@ -580,6 +584,7 @@ sub accept_or_recv {
             $fh->blocking(0);
             setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                 or die "setsockopt(TCP_NODELAY) failed:$!";
+
             $conn = {
                 fh => $fh,
                 fn => $fh->fileno,
@@ -587,6 +592,7 @@ sub accept_or_recv {
                 md5 => md5_hex($peer),
                 direct => 1,
                 reqs => 0,
+                can_keepalive => ($self->{stop_keepalive} < time ) ? 1 : 0,
             };
             last;
         }
@@ -605,6 +611,7 @@ sub accept_or_recv {
                     md5 => md5_hex($peer),
                     direct => 0,
                     reqs => 0,
+                    can_keepalive => 1,
                 };
                 last;
             }
