@@ -15,7 +15,7 @@ use Carp ();
 use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
-use POSIX qw(EINTR EAGAIN EWOULDBLOCK :sys_wait_h);
+use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE EDOM :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 
@@ -33,6 +33,8 @@ use constant CHUNKSIZE    => 64 * 1024;
 use constant DEBUG        => $ENV{MONOCEROS_DEBUG} || 0;
 
 my $null_io = do { open my $io, "<", \""; $io };
+my %ok_accept_errno = map { $_ => 1 } (EAGAIN, EWOULDBLOCK, ESPIPE, EINTR);
+my %ok_recv_errno = map { $_ => 1 } (EAGAIN, EWOULDBLOCK, EINTR, EDOM);
 
 sub new {
     my $class = shift;
@@ -66,7 +68,6 @@ sub new {
         max_workers          => $max_workers,
         timeout              => $args{timeout} || 300,
         keepalive_timeout    => $args{keepalive_timeout} || 10,
-        max_keepalive_connection   => $args{max_keepalive_connection} || 200,
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
         min_reqs_per_child   => (
@@ -97,11 +98,12 @@ sub run {
 sub setup_sockpair {
     my $self = shift;
 
-    my ($fh, $filename) = tempfile('monoceros_internal_XXXXXX',UNLINK => 0, SUFFIX => '.sock');
+    my ($fh, $filename) = tempfile('monoceros_internal_XXXXXX',UNLINK => 0, SUFFIX => '.sock', TMPDIR => 1);
     close($fh);
     unlink($filename);
     $self->{worker_sock} = $filename;
     my $sock = IO::Socket::UNIX->new(
+        Type => SOCK_STREAM,
         Listen => Socket::SOMAXCONN(),
         Local => $filename,
     ) or die $!;
@@ -178,6 +180,10 @@ sub connection_manager {
     $self->{sockets} = {};
     $self->{fdsend_queue} = [];
 
+    my $open_max = eval { POSIX::sysconf (POSIX::_SC_OPEN_MAX ()) - 1 } || 1023;
+    my $opened = scalar grep { POSIX::fstat($_) } (0..$open_max);
+    $self->{max_keepalive_connection} = $open_max - $opened - ( $self->{max_workers} * 4 );
+    warn sprintf "Set max_keepalive_connection to %s", $self->{max_keepalive_connection} if DEBUG;
     my $cv = AE::cv;
     my $close_all = 0;
     my $sig2;$sig2 = AE::signal 'USR1', sub {
@@ -278,14 +284,18 @@ sub connection_manager {
             }
             elsif ( $state eq 'fd' ) {
                 my $fd = IO::FDPass::recv(fileno $sock);
+                warn sprintf '%s (%d)', $!, $! if $fd < 0 && ! exists $ok_recv_errno{$!+0};
                 return if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
                 $state = 'cmd';
                 
-                return if $fd < 0;
-                
+                if ( $fd < 0 ) {
+                    $self->write_all_aeio($sock, "NG", $self->{keepalive_timeout});
+                    return;
+                }
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
-                $self->write_all_aeio($sock, "OK", $self->{keepalive_timeout});
+                my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NP';
+                $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
 
                 my $peername = $fh->peername;
                 return unless $peername;
@@ -382,6 +392,7 @@ sub request_worker {
             
             $self->{term_received} = 0;
             $self->{stop_accept} = 0;
+            $self->{stop_keepalive} = 0;
             local $SIG{TERM} = sub {
                 $self->{term_received}++;
                 exit 0 if $self->{term_received} > 1;
@@ -447,7 +458,8 @@ sub request_worker {
                 else {
                     #pre-read
                     my $ret = $conn->{fh}->sysread($prebuf, MAX_REQUEST_SIZE);
-                    if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) ) {
+                    if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) 
+                             && !$self->{stop_keepalive} ) {
                         $self->keep_or_send($conn);
                         next;
                     }
@@ -459,8 +471,8 @@ sub request_worker {
                 }
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
-                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept});
-
+                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept} || 
+                                           ($self->{stop_keepalive} > time && $conn->{direct} ));
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 
@@ -527,13 +539,15 @@ sub keep_or_send {
         } while (!$ret);
         my $buf = '';
         my $to_read = 2;
-        local $self->{_is_deferred_accept} = 1;
+        $self->{_is_deferred_accept} = 1;
         while ( length $buf < 2 ) {
             $self->read_timeout(
                 $self->{mgr_sock}, \$buf, $to_read - length $buf, length $buf,
                 $self->{timeout}
-            ) or return;
+            ) or last;
         }
+        $self->{stop_keepalive} = ($buf && $buf eq 'OK') ? 0 : time + $self->{keepalive_timeout} + 1;
+        warn "stop keepalive_mode until ".$self->{stop_keepalive} if DEBUG && $self->{stop_keepalive} ;
     }
     else {
         $self->cmd_to_mgr("keep",$conn->{md5});
@@ -547,6 +561,7 @@ sub accept_or_recv {
     for my $pipe_or_sock ( @for_read ) {
         if ( $pipe_or_sock->fileno == $self->{listen_sock}->fileno ) {
             my ($fh,$peer) = $self->{listen_sock}->accept;
+            warn sprintf '%s (%d)', $!, $! if ! exists $ok_accept_errno{$!+0};
             next unless $fh;
             $fh->blocking(0);
             setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
@@ -563,6 +578,7 @@ sub accept_or_recv {
         }
         elsif ( $pipe_or_sock->fileno == $self->{lstn_pipe}[READER]->fileno ) {
             my $fd = IO::FDPass::recv(fileno $pipe_or_sock);
+            warn sprintf '%s (%d)', $!, $! if ! exists $ok_recv_errno{$!+0};
             if ( $fd >= 0 ) {
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
