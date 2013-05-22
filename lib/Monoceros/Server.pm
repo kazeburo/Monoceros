@@ -66,7 +66,7 @@ sub new {
         max_workers          => $max_workers,
         timeout              => $args{timeout} || 300,
         keepalive_timeout    => $args{keepalive_timeout} || 10,
-        max_keepalive_reqs   => $args{max_keepalive_reqs} || 100,
+        max_keepalive_connection   => $args{max_keepalive_connection} || 200,
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
         min_reqs_per_child   => (
@@ -80,7 +80,7 @@ sub new {
             defined $args{err_respawn_interval}
                 ? $args{err_respawn_interval} : undef,
         ),
-        _using_defer_accept  => 0,
+        _using_defer_accept  => 1,
         listen_sock => ( defined $listen_sock ? $listen_sock : undef),
     }, $class;
 
@@ -232,8 +232,6 @@ sub connection_manager {
         }
     };
 
-
-
     $manager{internal_server} = AE::io $self->{internal_server}, 0, sub {
         my $sock = $self->{internal_server}->accept;
         return unless $sock;
@@ -301,30 +299,7 @@ sub connection_manager {
             } # cmd
         } # AE::io
     };
-        
-    if ( !$self->{_using_defer_accept} ) {
-        $manager{main_listener} = AE::io $self->{listen_sock}, 0, sub {
-            L_SOCK_READ: for (1..$self->{max_workers}) {
-                return if $term_received;
-                my ($fh,$peer) = $self->{listen_sock}->accept;
-                last L_SOCK_READ if $! == Errno::EAGAIN || $! == Errno::EWOULDBLOCK;
-                next unless $fh;
-                my $fd = $fh->fileno;
-                my $remote = md5_hex($peer);
-                $self->{sockets}{$fd} = [$fh,time,0,1];  #fh,time,reqs,idle,buf
-                $hash2fd{$remote} = $fd;
-                fh_nonblocking $fh, 1
-                    or die "failed to set socket to nonblocking mode:$!";
-                setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
-                    or die "setsockopt(TCP_NODELAY) failed:$!";
-                $wait_read{$fd} = AE::io $fh, 0, sub {
-                    delete $wait_read{$fd};
-                    $self->queued_fdsend($fd);
-                };
-            }
-        };
-    }
- 
+
     $cv->recv;
 }
 
@@ -365,13 +340,7 @@ sub request_worker {
     my ($self,$app) = @_;
 
     delete $self->{internal_server};
-    if ( $self->{_using_defer_accept} ) {
-        $self->{listen_sock}->blocking(0);
-    }
-    else {
-        $self->{listen_sock}->close;
-    }
-
+    $self->{listen_sock}->blocking(0);
     $self->{lstn_pipe}[WRITER]->close;
     $self->{lstn_pipe}[READER]->blocking(0);
 
@@ -393,14 +362,14 @@ sub request_worker {
     while ($pm->signal_received !~ /^(?:TERM|USR1)$/) {
         $pm->start(sub {
             srand();
-            my %sys_fileno;
-            $self->{select} = IO::Select->new();
-            $sys_fileno{$self->{lstn_pipe}[READER]->fileno} = 1;
-            $self->{select}->add($self->{lstn_pipe}[READER]);
-            if ( $self->{_using_defer_accept} ) {
-                $sys_fileno{$self->{listen_sock}->fileno} = 1;
-                $self->{select}->add($self->{listen_sock});
-            }
+            my %sys_fileno = (
+                $self->{lstn_pipe}[READER]->fileno => 1,
+                $self->{listen_sock}->fileno => 1,
+            );
+            $self->{select} = IO::Select->new(
+                $self->{lstn_pipe}[READER],
+                $self->{listen_sock}
+            );
 
             $self->{mgr_sock} = IO::Socket::UNIX->new(
                 Type => SOCK_STREAM,
@@ -576,7 +545,7 @@ sub accept_or_recv {
     my @for_read = @_;
     my $conn;
     for my $pipe_or_sock ( @for_read ) {
-        if ( $self->{_using_defer_accept} && $pipe_or_sock->fileno == $self->{listen_sock}->fileno ) {
+        if ( $pipe_or_sock->fileno == $self->{listen_sock}->fileno ) {
             my ($fh,$peer) = $self->{listen_sock}->accept;
             next unless $fh;
             $fh->blocking(0);
