@@ -260,6 +260,16 @@ sub connection_manager {
                 
                 # stat
                 if ( $method eq 'stat' ) {
+                    my $queued = scalar @{$self->{fdsend_queue}};
+                    my $active = scalar grep { !$self->{sockets}{$_}[S_IDLE] } keys %{$self->{sockets}};
+                    $active = $active - $queued;
+                    my $idle = scalar grep { $self->{sockets}{$_}[S_IDLE] } keys %{$self->{sockets}};
+                    my $msg = "Processing: $active\015\012";
+                    $msg .= "Waiting: $idle\015\012";
+                    $msg .= "Queued: $queued\015\012\015\012";
+                    $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
+                }
+                if ( $method eq 'cout' ) {
                     my $msg = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 'OK' : 'NG';
                     $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
                     return;
@@ -397,7 +407,7 @@ sub request_worker {
             ) or die "$!";
             $self->{mgr_sock}->blocking(0);
             
-            $self->cmd_to_mgr("stat",'x'x32);
+            $self->cmd_to_mgr("cout",'x'x32);
             my $buf = '';
             my $to_read = 2;
             while ( length $buf < $to_read ) {
@@ -469,6 +479,7 @@ sub request_worker {
                     'psgi.nonblocking'  => Plack::Util::FALSE,
                     'psgix.input.buffered' => Plack::Util::TRUE,
                     'psgix.io'          => $conn->{fh},
+                    'X_MONOCEROS_WORKER_SOCK' => $self->{worker_sock},
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
                 my $prebuf;
