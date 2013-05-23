@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.14 2013-05-23T02:38:10Z
+
+  - add Plack::Middleware::MonocerosStatus to display manager status
+
 0.13 2013-05-22T06:16:38Z
 
   - add max-keepalive-connection option
