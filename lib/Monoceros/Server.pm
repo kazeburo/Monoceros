@@ -151,7 +151,7 @@ sub queued_fdsend {
             if ( ! exists $self->{sockets}{$fd}  ) {
                 next;
             }
-            if ( !$self->{sockets}{$fd}[S_SOCK] || !$self->{sockets}{$fd}[S_SOCK]->connected ) {
+            if ( !$self->{sockets}{$fd}[S_SOCK] || !getpeername($self->{sockets}{$fd}[S_SOCK]) ) {
                 delete $self->{sockets}{$fd};
                 next;
             }
@@ -241,10 +241,11 @@ sub connection_manager {
 
     $manager{internal_server} = AE::io $self->{internal_server}, 0, sub {
         my $sock = $self->{internal_server}->accept;
+        fh_nonblocking($sock,1);
         return unless $sock;
         my $buf = '';
         my $state = 'cmd';
-        my $ws; $ws = AE::io $sock, 0, sub {
+        my $ws; $ws = AE::io fileno $sock, 0, sub {
             if ( $state eq 'cmd' ) {
                 my $len = sysread($sock, $buf, 37 - length($buf), length($buf));
                 if ( defined $len && $len == 0 ) {
@@ -286,7 +287,7 @@ sub connection_manager {
                     $self->{sockets}{$fd}[S_TIME] = time; #time
                     $self->{sockets}{$fd}[S_REQS]++; #reqs
                     $self->{sockets}{$fd}[S_IDLE] = 1; #idle
-                    $wait_read{$fd} = AE::io $self->{sockets}{$fd}[S_SOCK], 0, sub {
+                    $wait_read{$fd} = AE::io $fd, 0, sub {
                         delete $wait_read{$fd};
                         $self->queued_fdsend($fd);
                     };
@@ -301,18 +302,17 @@ sub connection_manager {
                     return;
                 }
 
-                my $fh = IO::Socket::INET->new_from_fd($fd,'r+');
+                open(my $fh, '+<&=', $fd);
                 if ( !$fh ) {
                     warn "unable to convert file descriptor to handle: $!";
                     return;
                 }
-
-                my $peername = $fh->peername;
+                my $peername = getpeername($fh);
                 return unless $peername;
                 my $remote = md5_hex($peername);
                 $self->{sockets}{$fd} = [$fh,time,1,1];  #fh,time,reqs,idle,buf
                 $hash2fd{$remote} = $fd;
-                $wait_read{$fd} = AE::io $self->{sockets}{$fd}[S_SOCK], 0, sub {
+                $wait_read{$fd} = AE::io $fd, 0, sub {
                     delete $wait_read{$fd};
                     $self->queued_fdsend($fd);
                 };
