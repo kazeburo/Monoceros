@@ -125,6 +125,8 @@ location that displays server status
 
 host based access control of a page of server status. supports IPv6 address.
 
+=back
+
 =head1 AUTHOR
 
 Masahiro Nagano E<lt>kazeburo {at} gmail.comE<gt>
