@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.15 2013-05-23T04:39:30Z
+
+  - fix pod
+
 0.14 2013-05-23T02:38:10Z
 
   - add Plack::Middleware::MonocerosStatus to display manager status
