@@ -89,7 +89,7 @@ Plack::Middleware::MonocerosStatus - show Monoceros connection manager status
   use Plack::Builder;
 
   builder {
-      enable "Plack::Middleware::ServerStatus::Lite",
+      enable "MonocerosStatus",
           path => '/monoceros-status',
           allow => [ '127.0.0.1', '192.168.0.0/16' ],
       $app;
