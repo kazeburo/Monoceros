@@ -122,10 +122,12 @@ sub setup_sockpair {
 sub run_workers {
     my ($self,$app) = @_;
     local $SIG{PIPE} = 'IGNORE';    
-    my $pid = fork;  
+    my $pid = fork;
     if ( $pid ) {
         #parent
         $self->connection_manager($pid);
+        delete $self->{internal_server};
+        unlink $self->{worker_sock};
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
