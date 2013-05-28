@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.16 2013-05-28T01:04:48Z
+
+  - remove sockfile at process exit
+
 0.15 2013-05-23T04:39:30Z
 
   - fix pod
