@@ -6,6 +6,15 @@ use Plack::Runner;
 use Test::More;
 use Test::TCP;
 
+{
+    no warnings 'redefine';
+    *Test::TCP::wait_port = sub {
+        my $port = shift;
+        Net::EmptyPort::wait_port($port, 0.1, 40) 
+                or die "cannot open port: $port";
+    };
+}
+
 test_tcp(
     server => sub {
         my $port = shift;

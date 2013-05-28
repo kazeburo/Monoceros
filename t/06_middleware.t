@@ -8,6 +8,15 @@ use LWP::UserAgent;
 use Test::TCP;
 use Test::More;
 
+{
+    no warnings 'redefine';
+    *Test::TCP::wait_port = sub {
+        my $port = shift;
+        Net::EmptyPort::wait_port($port, 0.1, 40) 
+                or die "cannot open port: $port";
+    };
+}
+
 my $app = builder {
     enable "MonocerosStatus",
         path => '/monoceros-status',
