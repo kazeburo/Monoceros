@@ -444,7 +444,7 @@ sub request_worker {
             ) or die "$!";
             $self->{mgr_sock}->blocking(0);
             
-            $self->{stop_keepalive} = 1;
+            $self->{stop_keepalive} = 0;
 
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
             my $proc_req_count = 0;
@@ -631,7 +631,7 @@ sub accept_or_recv {
                 peername => $peer,
                 direct => 1,
                 reqs => 0,
-                can_keepalive => ($self->{stop_keepalive} > 0 && $self->{stop_keepalive} < time ) ? 1 : 0,
+                can_keepalive => ($self->{stop_keepalive} == 0 || $self->{stop_keepalive} < time ) ? 1 : 0,
             };
             last;
         }
@@ -664,7 +664,7 @@ sub accept_or_recv {
                     peername => $peer,
                     direct => 0,
                     reqs => $buf_reqs,
-                    can_keepalive => ($self->{stop_keepalive} > 0 && $self->{stop_keepalive} < time ) ? 1 : 0,
+                    can_keepalive => ($self->{stop_keepalive} == 0 || $self->{stop_keepalive} < time ) ? 1 : 0,
                 };
                 last;
             }
