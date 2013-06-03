@@ -271,7 +271,7 @@ sub connection_manager {
                     $msg .= "Waiting: $idle\015\012";
                     $msg .= "Queued: $queued\015\012\015\012";
                     $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
-                    return
+                    return;
                 }
 
                 # other
@@ -602,7 +602,7 @@ sub keep_or_send {
         } while (!$ret);
 
         my $buf = '';
-        $self->read_timeout($self->{mgr_sock}, \$buf, 0, 1, $self->{timeout});
+        $self->read_timeout($self->{mgr_sock}, \$buf, 1, 0, $self->{timeout});
         my $can_keepalive = $buf;
         $self->{stop_keepalive} = $can_keepalive ?
             0 : time + $self->{keepalive_timeout} + 1;
