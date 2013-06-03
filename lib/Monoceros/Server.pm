@@ -656,6 +656,10 @@ sub accept_or_recv {
                 my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
                     or die "unable to convert file descriptor to handle: $!";
                 my $peer = $fh->peername;
+                if ( !$peer ) {
+                    $self->cmd_to_mgr('clos', sprintf ('%08x%08x',$buf_fd,$buf_reqs) );
+                    next;
+                }
                 next unless $peer;
                 $conn = {
                     fh => $fh,
