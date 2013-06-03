@@ -226,7 +226,7 @@ sub connection_manager {
         }
         for my $key ( keys %{$self->{sockets}} ) { #key = fd
             if ( ! $self->{sockets}{$key}[S_IDLE] && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout}
-                     && (!$self->{sockets}{$key}[S_SOCK] || !$self->{sockets}{$key}[S_SOCK]->connected()) ) {
+                     && (!$self->{sockets}{$key}[S_SOCK] || !getpeername($self->{sockets}{$key}[S_SOCK]) ) ) {
                 delete $wait_read{$key};
                 delete $self->{sockets}{$key};
             }
@@ -631,7 +631,7 @@ sub accept_or_recv {
                 peername => $peer,
                 direct => 1,
                 reqs => 0,
-                can_keepalive => ($self->{stop_keepalive} < time ) ? 1 : 0,
+                can_keepalive => ($self->{stop_keepalive} > 0 && $self->{stop_keepalive} < time ) ? 1 : 0,
             };
             last;
         }
@@ -664,7 +664,7 @@ sub accept_or_recv {
                     peername => $peer,
                     direct => 0,
                     reqs => $buf_reqs,
-                    can_keepalive => ($self->{stop_keepalive} < time ) ? 1 : 0,
+                    can_keepalive => ($self->{stop_keepalive} > 0 && $self->{stop_keepalive} < time ) ? 1 : 0,
                 };
                 last;
             }
