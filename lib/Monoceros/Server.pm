@@ -14,7 +14,7 @@ use Carp ();
 use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
-use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE EDOM :sys_wait_h);
+use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 
@@ -33,7 +33,7 @@ use constant DEBUG        => $ENV{MONOCEROS_DEBUG} || 0;
 
 my $null_io = do { open my $io, "<", \""; $io };
 my %ok_accept_errno = map { $_ => 1 } (EAGAIN, EWOULDBLOCK, ESPIPE, EINTR);
-my %ok_recv_errno = map { $_ => 1 } (EAGAIN, EWOULDBLOCK, EINTR, EDOM);
+my %ok_recv_errno = map { $_ => 1 } (EAGAIN, EWOULDBLOCK, EINTR);
 
 sub new {
     my $class = shift;
@@ -157,14 +157,14 @@ sub queued_send {
                 delete $self->{sockets}{$fd};
                 next;
             }
-            my $msg = sprintf(q!%08x%08x%s!, $fd, $self->{sockets}{$fd}[S_REQS], $can_keepalive);
-            my $ret = $self->{lstn_pipe}[WRITER]->send($msg);
+            my $msg = sprintf(q!%08x%08x%d!, $fd, $self->{sockets}{$fd}[S_REQS], $can_keepalive);
+            my $ret = send($self->{lstn_pipe}[WRITER],$msg,0);
             if ( !$ret  ) {
-                if ( $! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR ) {
+                if ( $! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR || $! == Errno::ENOBUFS) {
                     unshift @{$self->{fdsend_queue}}, $fd;
                     return;
                 }
-                die "unable to pass file handle: $!"; 
+                die "unable to pass queue: $!"; 
                 undef $self->{fdsend_worker};
             }
         } 
@@ -260,7 +260,6 @@ sub connection_manager {
                 return if length $buf < 21;
                 my $string = substr $buf, 0, 21, '';
                 my ($method,$args) = split / /,$string, 2;
-                                
                 # stat
                 if ( $method eq 'stat' ) {
                     my $queued = scalar @{$self->{fdsend_queue}};
@@ -273,7 +272,11 @@ sub connection_manager {
                     $self->write_all_aeio($sock, $msg, $self->{timeout});
                     return;
                 }
-
+                elsif ( $method eq 'coun' ) {
+                    my $can_keepalive = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 1 : 0;
+                    $self->write_all_aeio($sock, $can_keepalive, $self->{timeout});
+                    return;
+                }
                 # other
                 my $fd = hex(substr($args, 0, 8,''));
                 $reqs = hex(substr($args, 0, 8,''));
@@ -423,6 +426,7 @@ sub request_worker {
     my $pm = Parallel::Prefork->new(\%pm_args);
 
     while ($pm->signal_received !~ /^(?:TERM|USR1)$/) {
+
         $pm->start(sub {
             srand();
             my %sys_fileno = (
@@ -439,9 +443,8 @@ sub request_worker {
                 Peer => $self->{worker_sock},
             ) or die "$!";
             $self->{mgr_sock}->blocking(0);
-            
-            $self->{stop_keepalive} = 0;
 
+            
             my $max_reqs_per_child = $self->_calc_reqs_per_child();
             my $proc_req_count = 0;
             
@@ -455,14 +458,15 @@ sub request_worker {
                 $self->{select}->remove($self->{listen_sock});
                 $self->{stop_accept}++;
             };
+
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
 
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 last if ( $self->{term_received} 
-                       && !$next_conn 
-                   );
+                       && !$next_conn );
+
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #forward read or pipeline
                     $conn = $next_conn;
@@ -513,7 +517,7 @@ sub request_worker {
                 else {
                     #pre-read
                     my $ret = $conn->{fh}->sysread($prebuf, MAX_REQUEST_SIZE);
-                    if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK) ) {
+                    if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR) ) {
                         $self->keep_or_send($conn);
                         next;
                     }
@@ -593,7 +597,7 @@ sub keep_or_send {
         my $ret;
         do {
             $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fn});
-            die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK);
+            die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK && $! != EINTR);
             #need select?
         } while (!$ret);
     }
@@ -611,6 +615,11 @@ sub accept_or_recv {
             my ($fh,$peer) = $self->{listen_sock}->accept;
             warn sprintf '%s (%d)', $!, $! if ! exists $ok_accept_errno{$!+0};
             next unless $fh;
+
+            $self->cmd_to_mgr('coun',sprintf(q!%08x%08x!,0,0));
+            my $can_keepalive = '';
+            $self->read_timeout($self->{mgr_sock}, \$can_keepalive, 1, 0, $self->{timeout});
+           
             $fh->blocking(0);
             setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                 or die "setsockopt(TCP_NODELAY) failed:$!";
@@ -620,7 +629,7 @@ sub accept_or_recv {
                 peername => $peer,
                 direct => 1,
                 reqs => 0,
-                can_keepalive => ($self->{stop_keepalive} == 0 || $self->{stop_keepalive} < time ) ? 1 : 0,
+                can_keepalive => $can_keepalive
             };
             last;
         }
@@ -636,8 +645,6 @@ sub accept_or_recv {
             my $buf_reqs = hex(substr($buf, 0, 8,''));
             my $can_keepalive = $buf;
 
-            $self->{stop_keepalive} = $can_keepalive ?
-                0 : time + $self->{keepalive_timeout} + 1;
             $self->cmd_to_mgr('pull', sprintf ('%08x%08x',$buf_fd,0) );
             my $fd = $self->recv_fd_timeout($self->{mgr_sock}, $self->{timeout});
 
@@ -657,7 +664,7 @@ sub accept_or_recv {
                     peername => $peer,
                     direct => 0,
                     reqs => $buf_reqs,
-                    can_keepalive => ($self->{stop_keepalive} == 0 || $self->{stop_keepalive} < time ) ? 1 : 0,
+                    can_keepalive => $can_keepalive,
                 };
                 last;
             }
@@ -680,7 +687,7 @@ sub recv_fd_timeout {
     return $fd if $fd > 0;
     my $efd = '';
     vec($efd, $sock->fileno, 1) = 1;
-    my ($rfd, $wfd) = ('', $efd);    
+    my ($rfd, $wfd) = ($efd, ''); 
     my $can_read = select($rfd, $wfd, $efd, $timeout);
     return unless $can_read;
     goto DO_RECVFD;
