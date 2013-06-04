@@ -148,7 +148,6 @@ sub queued_send {
 
     push @{$self->{fdsend_queue}},  $fd;
     $self->{fdsend_worker} ||= AE::io $self->{lstn_pipe}[WRITER], 1, sub {
-        my $can_keepalive = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 1 : 0;
         while ( my $fd = shift @{$self->{fdsend_queue}} ) {
             if ( ! exists $self->{sockets}{$fd}  ) {
                 next;
@@ -157,7 +156,7 @@ sub queued_send {
                 delete $self->{sockets}{$fd};
                 next;
             }
-            my $msg = sprintf(q!%08x%08x%d!, $fd, $self->{sockets}{$fd}[S_REQS], $can_keepalive);
+            my $msg = sprintf(q!%08x%08x!, $fd, $self->{sockets}{$fd}[S_REQS]);
             my $ret = send($self->{lstn_pipe}[WRITER],$msg,0);
             if ( !$ret  ) {
                 if ( $! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR || $! == Errno::ENOBUFS) {
@@ -252,14 +251,15 @@ sub connection_manager {
         my $reqs;
         my $ws; $ws = AE::io fileno $sock, 0, sub {
             if ( $state eq 'cmd' ) {
-                my $len = sysread($sock, $buf, 21 - length($buf), length($buf));
+                my $len = sysread($sock, $buf, 20 - length($buf), length($buf));
                 if ( defined $len && $len == 0 ) {
                     undef $ws;
                     return;
                 }
-                return if length $buf < 21;
-                my $string = substr $buf, 0, 21, '';
-                my ($method,$args) = split / /,$string, 2;
+                return if length $buf < 20;
+                my $msg = substr $buf, 0, 20, '';
+                my $method = substr($msg, 0, 4,'');
+
                 # stat
                 if ( $method eq 'stat' ) {
                     my $queued = scalar @{$self->{fdsend_queue}};
@@ -278,8 +278,8 @@ sub connection_manager {
                     return;
                 }
                 # other
-                my $fd = hex(substr($args, 0, 8,''));
-                $reqs = hex(substr($args, 0, 8,''));
+                my $fd = hex(substr($msg, 0, 8,''));
+                $reqs = hex(substr($msg, 0, 8,''));
 
                 if ( $method eq 'push' ) {
                     $state = 'recv_fd';
@@ -318,7 +318,7 @@ sub connection_manager {
                     return;
                 }
 
-                open(my $fh, '+<&=', $fd);
+                open(my $fh, '<&='.$fd);
                 if ( !$fh ) {
                     warn "unable to convert file descriptor to handle: $!";
                     return;
@@ -426,7 +426,6 @@ sub request_worker {
     my $pm = Parallel::Prefork->new(\%pm_args);
 
     while ($pm->signal_received !~ /^(?:TERM|USR1)$/) {
-
         $pm->start(sub {
             srand();
             my %sys_fileno = (
@@ -474,7 +473,7 @@ sub request_worker {
                 else {
                     my @can_read = $self->{select}->can_read(1);
                     for (@can_read) {
-                        if ( $next_conn && $_->fileno == $next_conn->{fn} ) {
+                        if ( $next_conn && $_->fileno == $next_conn->{fh}->fileno ) {
                             $conn = $next_conn;
                         }
                     }
@@ -523,7 +522,7 @@ sub request_worker {
                     }
                     elsif ( defined $ret && $ret == 0 ) {
                         #closed?
-                        $self->cmd_to_mgr("clos", sprintf(q!%08x%08x!,$conn->{m_fn},$conn->{reqs}) ) 
+                        $self->cmd_to_mgr("clos", sprintf(q!%08x%08x!,$conn->{fd},$conn->{reqs}) ) 
                             unless $conn->{direct};
                         next;
                     }
@@ -536,10 +535,10 @@ sub request_worker {
                                       #  treat every connection as keepalive
                 
                 my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
-                                                         $may_keepalive, $is_keepalive, $prebuf, $conn->{direct});
+                                                         $may_keepalive, $is_keepalive, $prebuf);
                 $conn->{reqs}++;
                 if ( !$keepalive ) {
-                    $self->cmd_to_mgr("clos", sprintf(q!%08x%08x!,$conn->{m_fn},$conn->{reqs})) 
+                    $self->cmd_to_mgr("clos", sprintf(q!%08x%08x!,$conn->{fd},$conn->{reqs})) 
                         unless $conn->{direct};
                     next;
                 }
@@ -561,7 +560,7 @@ sub request_worker {
                     }
                     elsif ( defined $ret && $ret == 0 ) {
                         #closed?
-                        $self->cmd_to_mgr("clos", sprintf(q!%08x%08x!,$conn->{m_fn},$conn->{reqs})) 
+                        $self->cmd_to_mgr("clos", sprintf(q!%08x%08x!,$conn->{fd},$conn->{reqs})) 
                             unless $conn->{direct};
                         next;
                     }
@@ -586,23 +585,23 @@ sub request_worker {
 
 sub cmd_to_mgr {
     my $self = shift;
-    my $msg = join " ", @_;
+    my $msg = join "", @_;
     $self->write_all($self->{mgr_sock}, $msg, $self->{timeout}) or die $!;
 }
 
 sub keep_or_send {
     my ($self,$conn) = @_;
     if ( $conn->{direct} ) {
-        $self->cmd_to_mgr("push", sprintf('%08x%08x',$conn->{fn}, $conn->{reqs}));
+        $self->cmd_to_mgr("push", sprintf('%08x%08x',$conn->{fh}->fileno, $conn->{reqs}));
         my $ret;
         do {
-            $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fn});
+            $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fh}->fileno);
             die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK && $! != EINTR);
             #need select?
         } while (!$ret);
     }
     else {
-        $self->cmd_to_mgr("keep", sprintf(q!%08x%08x!,$conn->{m_fn},$conn->{reqs}));
+        $self->cmd_to_mgr("keep", sprintf(q!%08x%08x!,$conn->{fd},$conn->{reqs}));
     }
 }
 
@@ -621,7 +620,6 @@ sub accept_or_recv {
                 or die "setsockopt(TCP_NODELAY) failed:$!";
             $conn = {
                 fh => $fh,
-                fn => $fh->fileno,
                 peername => $peer,
                 direct => 1,
                 reqs => 0,
@@ -630,7 +628,7 @@ sub accept_or_recv {
             last;
         }
         elsif ( $pipe_or_sock->fileno == $self->{lstn_pipe}[READER]->fileno ) {
-            my $ret = $self->{lstn_pipe}[READER]->recv(my $buf, 17);
+            my $ret = $self->{lstn_pipe}[READER]->recv(my $buf, 16);
 
             if ( !defined $ret) {
                 warn sprintf '%s (%d)', $!, $! if ! exists $ok_recv_errno{$!+0};
@@ -639,15 +637,14 @@ sub accept_or_recv {
 
             my $buf_fd = hex(substr($buf, 0, 8,''));
             my $buf_reqs = hex(substr($buf, 0, 8,''));
-            my $can_keepalive = $buf;
 
             $self->cmd_to_mgr('pull', sprintf ('%08x%08x',$buf_fd,0) );
             my $fd = $self->recv_fd_timeout($self->{mgr_sock}, $self->{timeout});
 
             if ( defined $fd && $fd > 0 ) {
-                my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
+                open(my $fh, '<&='.$fd)
                     or die "unable to convert file descriptor to handle: $!";
-                my $peer = $fh->peername;
+                my $peer = getpeername($fh);
                 if ( !$peer ) {
                     $self->cmd_to_mgr('clos', sprintf ('%08x%08x',$buf_fd,$buf_reqs) );
                     next;
@@ -655,12 +652,11 @@ sub accept_or_recv {
                 next unless $peer;
                 $conn = {
                     fh => $fh,
-                    fn => $fh->fileno,
-                    m_fn => $buf_fd,
+                    fd => $buf_fd,
                     peername => $peer,
                     direct => 0,
                     reqs => $buf_reqs,
-                    can_keepalive => $can_keepalive,
+                    can_keepalive => 1,
                 };
                 last;
             }
@@ -690,7 +686,7 @@ sub recv_fd_timeout {
 }
 
 sub handle_connection {
-    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf, $direct) = @_;
+    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf) = @_;
     
     my $buf = '';
     my $pipelined_buf='';
@@ -729,12 +725,6 @@ sub handle_connection {
                         $use_keepalive = undef;
                     }
                 }
-                if ( $use_keepalive && $direct ) {
-                    $self->cmd_to_mgr('coun',sprintf(q!%08x%08x!,0,0));
-                    my $can_keepalive = '';
-                    $self->read_timeout($self->{mgr_sock}, \$can_keepalive, 1, 0, $self->{timeout});
-                    $use_keepalive = undef unless $can_keepalive;
-               } 
             }
             $buf = substr $buf, $reqlen;
             my $chunked = do { no warnings; lc delete $env->{HTTP_TRANSFER_ENCODING} eq 'chunked' };
