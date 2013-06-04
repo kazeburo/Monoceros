@@ -152,10 +152,6 @@ sub queued_send {
             if ( ! exists $self->{sockets}{$fd}  ) {
                 next;
             }
-            if ( !$self->{sockets}{$fd}[S_SOCK] ) {
-                delete $self->{sockets}{$fd};
-                next;
-            }
             my $msg = sprintf(q!%08x%08x!, $fd, $self->{sockets}{$fd}[S_REQS]);
             my $ret = send($self->{lstn_pipe}[WRITER],$msg,0);
             if ( !$ret  ) {
@@ -224,12 +220,12 @@ sub connection_manager {
             warn "queue: $queued | total: $total | active: $active | idle: $idle";
         }
         for my $key ( keys %{$self->{sockets}} ) { #key = fd
-            if ( ! $self->{sockets}{$key}[S_IDLE] && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout}
-                     && (!$self->{sockets}{$key}[S_SOCK] || !getpeername($self->{sockets}{$key}[S_SOCK]) ) ) {
-                delete $wait_read{$key};
-                delete $self->{sockets}{$key};
-            }
-            elsif ( $self->{sockets}{$key}[S_IDLE] && $self->{sockets}{$key}[S_REQS] == 0 
+            #if ( ! $self->{sockets}{$key}[S_IDLE] && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout}
+            #         && (!$self->{sockets}{$key}[S_SOCK] || !getpeername($self->{sockets}{$key}[S_SOCK]) ) ) {
+            #    delete $wait_read{$key};
+            #    delete $self->{sockets}{$key};
+            #}
+            if ( $self->{sockets}{$key}[S_IDLE] && $self->{sockets}{$key}[S_REQS] == 0 
                      && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout} ) { #idle && first req 
                 delete $wait_read{$key};
                 delete $self->{sockets}{$key};
@@ -318,13 +314,7 @@ sub connection_manager {
                     return;
                 }
 
-                open(my $fh, '<&='.$fd);
-                if ( !$fh ) {
-                    warn "unable to convert file descriptor to handle: $!";
-                    return;
-                }
-
-                $self->{sockets}{$fd} = [$fh,time,$reqs,1];  #fh,time,reqs,idle
+                $self->{sockets}{$fd} = [ AnyEvent::Util::guard { POSIX::close($fd) },time,$reqs,1];  #fh,time,reqs,idle
                 $wait_read{$fd} = AE::io $fd, 0, sub {
                     delete $wait_read{$fd};
                     $self->queued_send($fd);
@@ -612,7 +602,7 @@ sub accept_or_recv {
     for my $pipe_or_sock ( @for_read ) {
         if ( $pipe_or_sock->fileno == $self->{listen_sock}->fileno ) {
             my ($fh,$peer) = $self->{listen_sock}->accept;
-            warn sprintf '%s (%d)', $!, $! if ! exists $ok_accept_errno{$!+0};
+            warn sprintf '%s (%d)', $!, $! if !exists $ok_accept_errno{$!+0};
             next unless $fh;
 
             fh_nonblocking($fh,1);
