@@ -473,10 +473,16 @@ sub request_worker {
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
-
+            $self->{stop_keepalive} = $self->read_can_keepalive() ? 0 : 1;
+            $self->{stop_keepalive_check} = time + rand();
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 last if ( $self->{term_received} 
                        && !$next_conn );
+                my $time = time;
+                if ( $self->{stop_keepalive_check} > $time ) {
+                    $self->{stop_keepalive} = $self->read_can_keepalive() ? 0 : 1;
+                    $self->{stop_keepalive_check} = $time + 1;
+                }
 
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #forward read or pipeline
@@ -541,7 +547,7 @@ sub request_worker {
                 }
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
-                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept} || !$conn->{can_keepalive});
+                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept} || $self->{stop_keepalive});
 
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
@@ -635,7 +641,6 @@ sub accept_or_recv {
                 peername => $peer,
                 direct => 1,
                 reqs => 0,
-                can_keepalive => $self->read_can_keepalive,
             };
             last;
         }
@@ -668,7 +673,6 @@ sub accept_or_recv {
                     peername => $peer,
                     direct => 0,
                     reqs => $buf_reqs,
-                    can_keepalive => $self->read_can_keepalive,
                 };
                 last;
             }
