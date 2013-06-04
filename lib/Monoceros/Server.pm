@@ -84,7 +84,6 @@ sub new {
                 ? $args{err_respawn_interval} : undef,
         ),
         _using_defer_accept  => 1,
-        _enable_push_ack => $^O eq 'linux' ? 0 : 1,
         listen_sock => ( defined $listen_sock ? $listen_sock : undef),
     }, $class;
 
@@ -271,7 +270,7 @@ sub connection_manager {
                     my $msg = "Processing: $active\015\012";
                     $msg .= "Waiting: $idle\015\012";
                     $msg .= "Queued: $queued\015\012\015\012";
-                    $self->write_all_aeio($sock, $msg, $self->{keepalive_timeout});
+                    $self->write_all_aeio($sock, $msg, $self->{timeout});
                     return;
                 }
 
@@ -311,23 +310,17 @@ sub connection_manager {
                 }
 
                 $state = 'cmd';
-                my $error = 0;
                 if ( $fd < 0 ) {
                     warn sprintf 'Failed recv fd: %s (%d)', $!, $!;
-                    $error = 1;
+                    return;
                 }
 
                 open(my $fh, '+<&=', $fd);
                 if ( !$fh ) {
                     warn "unable to convert file descriptor to handle: $!";
-                    $error = 1;
+                    return;
                 }
-                if ( $self->{_enable_push_ack} ) {
-                    my $can_keepalive = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 1 : 0;
-                    $self->write_all_aeio($sock, $can_keepalive
-                                              , $self->{keepalive_timeout});
-                }
-                return if $error;
+
                 $self->{sockets}{$fd} = [$fh,time,$reqs,1];  #fh,time,reqs,idle
                 $wait_read{$fd} = AE::io $fd, 0, sub {
                     delete $wait_read{$fd};
@@ -603,14 +596,6 @@ sub keep_or_send {
             die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK);
             #need select?
         } while (!$ret);
-
-        if ( $self->{_enable_push_ack} ) {
-            my $buf = '';
-            $self->read_timeout($self->{mgr_sock}, \$buf, 1, 0, $self->{timeout});
-            my $can_keepalive = $buf;
-            $self->{stop_keepalive} = $can_keepalive ?
-                0 : time + $self->{keepalive_timeout} + 1;
-        }
     }
     else {
         $self->cmd_to_mgr("keep", sprintf(q!%08x%08x!,$conn->{m_fn},$conn->{reqs}));
@@ -688,13 +673,15 @@ sub recv_fd_timeout {
     my ($self, $sock, $timeout ) = @_;
  DO_RECVFD:
     my $fd = IO::FDPass::recv($sock->fileno);
-    if ( $fd < 0 && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK && $! != EDOM) ) {
+    if ( $fd < 0 && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK) ) {
         warn sprintf("could not recv fd: %s (%d)", $!, $!);
         return;
     }
     return $fd if $fd > 0;
-    my $select = IO::Select->new($sock);
-    my $can_read = $select->can_read($timeout);
+    my $efd = '';
+    vec($efd, $sock->fileno, 1) = 1;
+    my ($rfd, $wfd) = ('', $efd);    
+    my $can_read = select($rfd, $wfd, $efd, $timeout);
     return unless $can_read;
     goto DO_RECVFD;
 }
