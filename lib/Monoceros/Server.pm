@@ -21,7 +21,7 @@ use File::Temp qw/tempfile/;
 use constant WRITER => 0;
 use constant READER => 1;
 
-use constant S_SOCK => 0;
+use constant S_GUARD => 0;
 use constant S_TIME => 1;
 use constant S_REQS => 2;
 use constant S_IDLE => 3;
@@ -115,6 +115,11 @@ sub setup_sockpair {
             or die "failed to create socketpair: $!";
     $self->{lstn_pipe} = \@lstn_pipe;
 
+    my ($fh2, $filename2) = tempfile('monoceros_stat_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
+    $self->{sock_stat} = $fh2;
+    $self->{sock_stat_file} = $filename2;
+    $self->update_sock_stat();
+
     1;
 }
 
@@ -127,6 +132,8 @@ sub run_workers {
         $self->connection_manager($pid);
         delete $self->{internal_server};
         unlink $self->{worker_sock};
+        delete $self->{sock_stat};
+        unlink $self->{sock_stat_file};
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
@@ -166,6 +173,22 @@ sub queued_send {
         undef $self->{fdsend_worker};
     };
     1;
+}
+
+sub update_sock_stat {
+    my $self = shift;
+    #OK 1byte NG 2byte
+    my $can_keepalive = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? '1' : '0';
+    sysseek($self->{sock_stat},0,0);
+    syswrite($self->{sock_stat},$can_keepalive);
+}
+
+sub read_can_keepalive {
+   my $self = shift;
+   sysseek($self->{sock_stat},0,0);
+   my $can_keepalive;
+   sysread($self->{sock_stat}, $can_keepalive, 1);
+   return $can_keepalive;
 }
 
 sub connection_manager {
@@ -229,12 +252,14 @@ sub connection_manager {
                      && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout} ) { #idle && first req 
                 delete $wait_read{$key};
                 delete $self->{sockets}{$key};
+                
             }
             elsif ( $self->{sockets}{$key}[S_IDLE] && $self->{sockets}{$key}[S_REQS] > 0 &&
                      $time - $self->{sockets}{$key}[S_TIME] > $self->{keepalive_timeout} ) { #idle && keepalive
                 delete $wait_read{$key};
                 delete $self->{sockets}{$key};
             }
+            $self->update_sock_stat();
         }
     };
 
@@ -268,11 +293,6 @@ sub connection_manager {
                     $self->write_all_aeio($sock, $msg, $self->{timeout});
                     return;
                 }
-                elsif ( $method eq 'coun' ) {
-                    my $can_keepalive = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? 1 : 0;
-                    $self->write_all_aeio($sock, $can_keepalive, $self->{timeout});
-                    return;
-                }
                 # other
                 my $fd = hex(substr($msg, 0, 8,''));
                 $reqs = hex(substr($msg, 0, 8,''));
@@ -290,6 +310,7 @@ sub connection_manager {
                 elsif ( $method eq 'clos' ) { # close
                     $self->{sockets}{$fd}[S_IDLE] = 1;
                     delete $self->{sockets}{$fd};
+                    $self->update_sock_stat();
                 }
                 elsif ( $method eq 'keep') { #keepalive
                     $self->{sockets}{$fd}[S_TIME] = time; #time
@@ -315,6 +336,7 @@ sub connection_manager {
                 }
 
                 $self->{sockets}{$fd} = [ AnyEvent::Util::guard { POSIX::close($fd) },time,$reqs,1];  #fh,time,reqs,idle
+                $self->update_sock_stat();
                 $wait_read{$fd} = AE::io $fd, 0, sub {
                     delete $wait_read{$fd};
                     $self->queued_send($fd);
@@ -613,7 +635,7 @@ sub accept_or_recv {
                 peername => $peer,
                 direct => 1,
                 reqs => 0,
-                can_keepalive => 1,
+                can_keepalive => $self->read_can_keepalive,
             };
             last;
         }
@@ -646,7 +668,7 @@ sub accept_or_recv {
                     peername => $peer,
                     direct => 0,
                     reqs => $buf_reqs,
-                    can_keepalive => 1,
+                    can_keepalive => $self->read_can_keepalive,
                 };
                 last;
             }
