@@ -115,9 +115,8 @@ sub setup_sockpair {
             or die "failed to create socketpair: $!";
     $self->{lstn_pipe} = \@lstn_pipe;
 
-    my ($fh2, $filename2) = tempfile('monoceros_stat_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
-    $self->{sock_stat} = $fh2;
-    $self->{sock_stat_file} = $filename2;
+    my ($fh2, $filename2) = tempfile('monoceros_stat_XXXXXX',UNLINK => 0, SUFFIX => '.link', TMPDIR => 1);
+    $self->{sock_stat_link} = $filename2;
     $self->update_sock_stat();
 
     1;
@@ -132,8 +131,7 @@ sub run_workers {
         $self->connection_manager($pid);
         delete $self->{internal_server};
         unlink $self->{worker_sock};
-        delete $self->{sock_stat};
-        unlink $self->{sock_stat_file};
+        unlink $self->{sock_stat_link};
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
@@ -177,18 +175,20 @@ sub queued_send {
 
 sub update_sock_stat {
     my $self = shift;
-    #OK 1byte NG 2byte
     my $can_keepalive = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? '1' : '0';
-    sysseek($self->{sock_stat},0,0);
-    syswrite($self->{sock_stat},$can_keepalive);
+
+    if ( $can_keepalive ) {
+        unlink $self->{sock_stat_link};
+    }
+    else {
+        symlink($self->{worker_sock}, $self->{sock_stat_link});        
+    }
+    
 }
 
 sub read_can_keepalive {
    my $self = shift;
-   sysseek($self->{sock_stat},0,0);
-   my $can_keepalive;
-   sysread($self->{sock_stat}, $can_keepalive, 1);
-   return $can_keepalive;
+   return ! -l $self->{sock_stat_link};
 }
 
 sub connection_manager {
@@ -473,16 +473,11 @@ sub request_worker {
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
-            $self->{stop_keepalive} = $self->read_can_keepalive() ? 0 : 1;
-            $self->{stop_keepalive_check} = time + rand();
+
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 last if ( $self->{term_received} 
                        && !$next_conn );
-                my $time = time;
-                if ( $self->{stop_keepalive_check} > $time ) {
-                    $self->{stop_keepalive} = $self->read_can_keepalive() ? 0 : 1;
-                    $self->{stop_keepalive_check} = $time + 1;
-                }
+                $self->{stop_keepalive} = $self->read_can_keepalive() ? 0 : 1;
 
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #forward read or pipeline
