@@ -69,6 +69,7 @@ sub new {
         max_workers          => $max_workers,
         timeout              => $args{timeout} || 300,
         keepalive_timeout    => $args{keepalive_timeout} || 10,
+        max_keepalive_reqs   => $args{max_keepalive_reqs} || 100,
         max_keepalive_connection => $args{max_keepalive_connection} || int($open_max/2),
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
@@ -543,6 +544,9 @@ sub request_worker {
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
                 $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept} || $self->{stop_keepalive});
+                if ( $conn->{reqs} + 1 >= $self->{max_keepalive_reqs} ) {
+                    $may_keepalive = 0;
+                }
 
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
