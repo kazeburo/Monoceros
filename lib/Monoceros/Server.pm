@@ -536,7 +536,7 @@ sub request_worker {
                                       #  treat every connection as keepalive
                 
                 my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
-                                                         $may_keepalive, $is_keepalive, $prebuf);
+                                                         $may_keepalive, $is_keepalive, $prebuf, $conn->{direct});
                 $conn->{reqs}++;
                 if ( !$keepalive ) {
                     $self->cmd_to_mgr("clos", sprintf(q!%08x%08x!,$conn->{m_fn},$conn->{reqs})) 
@@ -616,11 +616,7 @@ sub accept_or_recv {
             warn sprintf '%s (%d)', $!, $! if ! exists $ok_accept_errno{$!+0};
             next unless $fh;
 
-            $self->cmd_to_mgr('coun',sprintf(q!%08x%08x!,0,0));
-            my $can_keepalive = '';
-            $self->read_timeout($self->{mgr_sock}, \$can_keepalive, 1, 0, $self->{timeout});
-           
-            $fh->blocking(0);
+            fh_nonblocking($fh,1);
             setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                 or die "setsockopt(TCP_NODELAY) failed:$!";
             $conn = {
@@ -629,7 +625,7 @@ sub accept_or_recv {
                 peername => $peer,
                 direct => 1,
                 reqs => 0,
-                can_keepalive => $can_keepalive
+                can_keepalive => 1,
             };
             last;
         }
@@ -694,7 +690,7 @@ sub recv_fd_timeout {
 }
 
 sub handle_connection {
-    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf) = @_;
+    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf, $direct) = @_;
     
     my $buf = '';
     my $pipelined_buf='';
@@ -733,6 +729,12 @@ sub handle_connection {
                         $use_keepalive = undef;
                     }
                 }
+                if ( $use_keepalive && $direct ) {
+                    $self->cmd_to_mgr('coun',sprintf(q!%08x%08x!,0,0));
+                    my $can_keepalive = '';
+                    $self->read_timeout($self->{mgr_sock}, \$can_keepalive, 1, 0, $self->{timeout});
+                    $use_keepalive = undef unless $can_keepalive;
+               } 
             }
             $buf = substr $buf, $reqlen;
             my $chunked = do { no warnings; lc delete $env->{HTTP_TRANSFER_ENCODING} eq 'chunked' };
