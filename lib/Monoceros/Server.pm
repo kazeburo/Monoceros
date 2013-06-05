@@ -14,7 +14,7 @@ use Carp ();
 use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
-use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE :sys_wait_h);
+use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS :sys_wait_h);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 
@@ -118,8 +118,7 @@ sub setup_sockpair {
     $self->{lstn_pipe} = \@lstn_pipe;
 
     my ($fh2, $filename2) = tempfile('monoceros_stat_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
-    $self->{sock_stat} = $fh2;
-    $self->{sock_stat_file} = $filename2;
+    $self->{sock_stat_link} = $filename2;
     $self->update_sock_stat();
 
     1;
@@ -134,8 +133,7 @@ sub run_workers {
         $self->connection_manager($pid);
         delete $self->{internal_server};
         unlink $self->{worker_sock};
-        delete $self->{sock_stat};
-        unlink $self->{sock_stat_file};
+        unlink $self->{sock_stat_link};
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
@@ -164,7 +162,7 @@ sub queued_send {
             my $msg = sprintf(q!%08x%08x!, $fd, $self->{sockets}{$fd}[S_REQS]);
             my $ret = send($self->{lstn_pipe}[WRITER],$msg,0);
             if ( !$ret  ) {
-                if ( $! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR ) {
+                if ( $! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR || $! == ENOBUFS) {
                     unshift @{$self->{fdsend_queue}}, $fd;
                     return;
                 }
@@ -179,18 +177,17 @@ sub queued_send {
 
 sub update_sock_stat {
     my $self = shift;
-    my $queued = scalar grep { $self->{sockets}{$_}[S_STATE] == 1} keys %{$self->{sockets}};
-    my $idle = scalar grep { $self->{sockets}{$_}[S_STATE] == 0} keys %{$self->{sockets}};
-    seek($self->{sock_stat}, 0, 0);
-    syswrite($self->{sock_stat}, sprintf('%08x%08x',$queued,$idle));    
+    if ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) {
+        unlink $self->{sock_stat_link};
+    }
+    else {
+        symlink $self->{worker_sock}, $self->{sock_stat_link};
+    }
 }
 
 sub read_sock_stat {
    my $self = shift;
-   seek($self->{sock_stat}, 0, 0);
-   sysread($self->{sock_stat}, my $buf, 16);
-   return (0,0) unless $buf;
-   return (hex(substr($buf,0,8,'')) , hex(substr($buf,0,8,''))); #queue, idle
+   return -l $self->{sock_stat_link};
 }
 
 sub connection_manager {
@@ -476,10 +473,8 @@ sub request_worker {
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 last if ( $self->{term_received} 
                        && !$next_conn );
-                my ($stat_queue, $stat_idle) = $self->read_sock_stat;
+                $self->{stop_keepalive} = $self->read_sock_stat;
                 
-                $self->{stop_keepalive} = ($stat_queue + $stat_idle > $self->{max_keepalive_connection}) ? 1 : 0;
-
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #forward read or pipeline
                     $conn = $next_conn;
@@ -563,7 +558,7 @@ sub request_worker {
                 }
 
                 # read fowrard
-                if ( $self->{max_workers} > $stat_queue && $proc_req_count < $max_reqs_per_child ) {
+                if ( $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
