@@ -117,8 +117,9 @@ sub setup_sockpair {
             or die "failed to create socketpair: $!";
     $self->{lstn_pipe} = \@lstn_pipe;
 
-    my ($fh2, $filename2) = tempfile('monoceros_stat_XXXXXX',UNLINK => 0, SUFFIX => '.link', TMPDIR => 1);
-    $self->{sock_stat_link} = $filename2;
+    my ($fh2, $filename2) = tempfile('monoceros_stat_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
+    $self->{sock_stat} = $fh2;
+    $self->{sock_stat_file} = $filename2;
     $self->update_sock_stat();
 
     1;
@@ -133,7 +134,8 @@ sub run_workers {
         $self->connection_manager($pid);
         delete $self->{internal_server};
         unlink $self->{worker_sock};
-        unlink $self->{sock_stat_link};
+        delete $self->{sock_stat};
+        unlink $self->{sock_stat_file};
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
@@ -177,20 +179,18 @@ sub queued_send {
 
 sub update_sock_stat {
     my $self = shift;
-    my $can_keepalive = ( scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection} ) ? '1' : '0';
-
-    if ( $can_keepalive ) {
-        unlink $self->{sock_stat_link};
-    }
-    else {
-        symlink($self->{worker_sock}, $self->{sock_stat_link});        
-    }
-    
+    my $queued = scalar grep { $self->{sockets}{$_}[S_STATE] == 1} keys %{$self->{sockets}};
+    my $idle = scalar grep { $self->{sockets}{$_}[S_STATE] == 0} keys %{$self->{sockets}};
+    seek($self->{sock_stat}, 0, 0);
+    syswrite($self->{sock_stat}, sprintf('%08x%08x',$queued,$idle));    
 }
 
-sub read_can_keepalive {
+sub read_sock_stat {
    my $self = shift;
-   return ! -l $self->{sock_stat_link};
+   seek($self->{sock_stat}, 0, 0);
+   sysread($self->{sock_stat}, my $buf, 16);
+   return (0,0) unless $buf;
+   return (hex(substr($buf,0,8,'')) , hex(substr($buf,0,8,''))); #queue, idle
 }
 
 sub connection_manager {
@@ -476,7 +476,9 @@ sub request_worker {
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 last if ( $self->{term_received} 
                        && !$next_conn );
-                $self->{stop_keepalive} = $self->read_can_keepalive() ? 0 : 1;
+                my ($stat_queue, $stat_idle) = $self->read_sock_stat;
+                
+                $self->{stop_keepalive} = ($stat_queue + $stat_idle > $self->{max_keepalive_connection}) ? 1 : 0;
 
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #forward read or pipeline
@@ -561,7 +563,7 @@ sub request_worker {
                 }
 
                 # read fowrard
-                if ( $proc_req_count < $max_reqs_per_child ) {
+                if ( $self->{max_workers} > $stat_queue && $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
