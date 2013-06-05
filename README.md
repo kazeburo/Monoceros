@@ -71,6 +71,10 @@ max. number of requests allowed per single persistent connection.  If set to one
 
 number of connections to keep in the manager process. If you want to increase this value, You should check your system limitations. (default: half number of POSIX::\_SC\_OPEN\_MAX)
 
+## \--read-ahead-power=\#
+
+floating number in 0 to 1. rate to read ahead request. If set to high number, Monoceros attempts to read the next request from current socket strongly. Result, throughput is higher. Conversely, For small delay, set low number. Monoceros attempts to read a request from other sockets. (default: 0.5)
+
 # RECOMMENDED MODULES
 
 For more performance. I recommends you to install these module.

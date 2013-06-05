@@ -470,12 +470,12 @@ sub request_worker {
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
+            $self->{stop_keepalive} = $self->read_sock_stat;
 
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 last if ( $self->{term_received} 
                        && !$next_conn );
-                $self->{stop_keepalive} = $self->read_sock_stat;
-                
+                                
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #read ahead or pipeline
                     $conn = $next_conn;
@@ -489,7 +489,7 @@ sub request_worker {
                     }
                     #read ahread. but still cannot read
                     $self->keep_it($next_conn) if $next_conn && !$conn;
-
+                    $self->{stop_keepalive} = $self->read_sock_stat;
                     #accept or recv
                     $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read )
                         unless $conn;
