@@ -31,7 +31,7 @@ test_tcp(
         my ($port, $server_pid) = @_;
         my $ua = LWP::UserAgent->new();
         my $res = $ua->get(sprintf('http://localhost:%s/monoceros-status',$port));
-        like $res->content, qr/Processing: \d+/;
+        like $res->content, qr/Total: \d+/;
         like $res->content, qr/Waiting: \d+/;
         like $res->content, qr/Queued: \d+/;
     },

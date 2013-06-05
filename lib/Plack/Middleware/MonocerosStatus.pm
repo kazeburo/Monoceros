@@ -57,7 +57,7 @@ sub _handle_status {
         Type => SOCK_STREAM,
         Peer => $env->{X_MONOCEROS_WORKER_SOCK}
     ) or return [500, ['Content-Type' => 'text/plain'], [ 'Could not open Monoceros sock: $!' ]];
-    $fh->syswrite('stat '.'x'x32);
+    $fh->syswrite('stat'.'x'x16);
     my $len = $fh->sysread(my $buf, 1024);
     if ( !$len ) {
         return [500, ['Content-Type' => 'text/plain'], [ 'Could not read status: $!' ]];
@@ -96,17 +96,17 @@ Plack::Middleware::MonocerosStatus - show Monoceros connection manager status
   };
 
   % curl http://server:port/monoceros-status
-  Processing: 2
+  Total: 100
   Waiting: 98
-  Queued: 0
+  Queued: 2
 
 =head1 DESCRIPTION
 
 Plack::Middleware::MonocerosStatus is a middleware to display Monoceros manager status.
 
-  Processing - a number of socket processed by worker
   Waiting - a number of keepalive socket, waiting to next request
   Queued - a number of request arrived socket, waiting to process by worker
+  Total - waiting + Queued
 
 =head1 CONFIGURATIONS
 
