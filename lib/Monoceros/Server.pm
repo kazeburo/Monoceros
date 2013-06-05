@@ -85,6 +85,7 @@ sub new {
                 ? $args{err_respawn_interval} : undef,
         ),
         _using_defer_accept  => 1,
+        _enable_fdpass_ack => $^O eq 'linux' ? 0 : 1,
         listen_sock => ( defined $listen_sock ? $listen_sock : undef),
     }, $class;
 
@@ -304,10 +305,17 @@ sub connection_manager {
                         ? $fd
                         : 0;
                     $self->send_fd_aeio($sock, $send_fd, $self->{timeout});
-                    delete $self->{sockets}{$fd};
-                    $self->update_sock_stat();
+                    if ( !$self->{_enable_fdpass_ack} ) {
+                        delete $self->{sockets}{$fd};
+                        $self->update_sock_stat();  
+                    }
                     return;
                 }
+                elsif ( $method eq 'clos' ) {
+                    delete $self->{sockets}{$fd};
+                    $self->update_sock_stat();   
+                }
+                
             }
 
             if ( $state eq 'recv_fd' ) {
@@ -315,14 +323,18 @@ sub connection_manager {
                 if ( $fd < 0 && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK) ) {
                     return;
                 }
-
+                if ( $self->{_enable_fdpass_ack} ) {
+                    $self->write_all_aeio($sock, "1", $self->{timeout});
+                }
                 $state = 'cmd';
                 if ( $fd <= 0 ) {
                     warn sprintf 'Failed recv fd: %s (%d)', $!, $!;
                     return;
                 }
 
-                $self->{sockets}{$fd} = [ AnyEvent::Util::guard { POSIX::close($fd) },time,$reqs,0];  #fh,time,reqs,state
+                $self->{sockets}{$fd} = [ AnyEvent::Util::guard {
+                    POSIX::close($fd)
+                },time,$reqs,0];  #fh,time,reqs,state
                 $self->update_sock_stat();
                 $wait_read{$fd} = AE::io $fd, 0, sub {
                     delete $wait_read{$fd};
@@ -593,7 +605,11 @@ sub keep_it {
         $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fh}->fileno);
         die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK && $! != EINTR);
         #need select?
-    } while (!$ret);    
+    } while (!$ret);
+    if ( $self->{_enable_fdpass_ack} ) {
+        my $buf;
+        $self->read_timeout($self->{mgr_sock}, \$buf, 1, 0, $self->{timeout});
+    }
 }
 
 sub accept_or_recv {
@@ -629,7 +645,10 @@ sub accept_or_recv {
 
             $self->cmd_to_mgr('pull', sprintf ('%08x%08x',$buf_fd, $buf_reqs) );
             my $fd = $self->recv_fd_timeout($self->{mgr_sock}, $self->{timeout});
-            
+            if ( $self->{_enable_fdpass_ack} ) {
+                $self->cmd_to_mgr('clos', sprintf ('%08x%08x',$buf_fd, $buf_reqs) );
+            }            
+
             if ( defined $fd && $fd > 0 ) {
                 open(my $fh, '<&='.$fd)
                     or die "unable to convert file descriptor to handle: $!";
