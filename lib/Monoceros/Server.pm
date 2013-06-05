@@ -71,6 +71,7 @@ sub new {
         keepalive_timeout    => $args{keepalive_timeout} || 10,
         max_keepalive_reqs   => $args{max_keepalive_reqs} || 100,
         max_keepalive_connection => $args{max_keepalive_connection} || int($open_max/2),
+        read_ahread_power   => $args{read_ahread_power} || 0.5,
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
         min_reqs_per_child   => (
@@ -476,7 +477,7 @@ sub request_worker {
                 $self->{stop_keepalive} = $self->read_sock_stat;
                 
                 my $conn;
-                if ( $next_conn && $next_conn->{buf} ) { #forward read or pipeline
+                if ( $next_conn && $next_conn->{buf} ) { #read ahead or pipeline
                     $conn = $next_conn;
                 }
                 else {
@@ -486,7 +487,7 @@ sub request_worker {
                             $conn = $next_conn;
                         }
                     }
-                    #forward read. but still cannot read
+                    #read ahread. but still cannot read
                     $self->keep_it($next_conn) if $next_conn && !$conn;
 
                     #accept or recv
@@ -557,7 +558,7 @@ sub request_worker {
                     next;
                 }
 
-                # read fowrard
+                # read ahread
                 if ( $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
@@ -569,9 +570,11 @@ sub request_worker {
                         #closed?
                         next;
                     }
-                    $self->{select}->add($conn->{fh});
-                    $next_conn = $conn;
-                    next;
+                    if  ( rand() > 1 - $self->{read_ahread_power} ) {
+                        $self->{select}->add($conn->{fh});
+                        $next_conn = $conn;
+                        next;
+                    }
                 }
 
                 # wait
