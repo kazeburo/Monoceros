@@ -493,7 +493,7 @@ sub request_worker {
                             $conn = $next_conn;
                         }
                     }
-                    #read ahread. but still cannot read
+                    #read ahead. but still cannot read
                     $self->keep_it($next_conn) if $next_conn && !$conn;
                     #accept or recv
                     $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read )
@@ -565,7 +565,7 @@ sub request_worker {
                 }
 
                 # read ahead
-                if ( 0 && $proc_req_count < $max_reqs_per_child ) {
+                if ( $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
