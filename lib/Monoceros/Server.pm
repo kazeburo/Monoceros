@@ -645,7 +645,7 @@ sub accept_or_recv {
         }
         elsif ( $pipe_or_sock->fileno == $self->{lstn_pipe}[READER]->fileno ) {
             my $fd = IO::FDPass::recv($self->{lstn_pipe}[READER]->fileno);
-            if ( $fd < 0 && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK) ) {
+            if ( $fd < 0 && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK && $! != ESPIPE) ) {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
             next if $fd <= 0;
