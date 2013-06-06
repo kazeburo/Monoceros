@@ -45,6 +45,7 @@
             "AnyEvent" : "7.04",
             "IO::FDPass" : "1.0",
             "Net::CIDR::Lite" : "0",
+            "POSIX::getpeername" : "0",
             "Plack" : "1.0023",
             "Starlet" : "0.18",
             "perl" : "5.008005"

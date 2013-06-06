@@ -33,7 +33,7 @@ test_tcp(
         my $res = $ua->get(sprintf('http://localhost:%s/monoceros-status',$port));
         like $res->content, qr/Total: \d+/;
         like $res->content, qr/Waiting: \d+/;
-        like $res->content, qr/Queued: \d+/;
+        like $res->content, qr/Processing: \d+/;
     },
     server => sub {
         my $port = shift;
