@@ -23,10 +23,11 @@ use Digest::MD5 qw/md5/;
 use constant WRITER => 0;
 use constant READER => 1;
 
-use constant S_FH => 0;
-use constant S_TIME => 1;
-use constant S_REQS => 2;
-use constant S_STATE => 3; # 0:idle 1:queue
+use constant S_GD => 0;
+use constant S_FD => 1;
+use constant S_TIME => 2;
+use constant S_REQS => 3;
+use constant S_STATE => 4; # 0:idle 1:queue
 
 use constant MAX_REQUEST_SIZE => 131072;
 use constant CHUNKSIZE    => 64 * 1024;
@@ -160,13 +161,13 @@ sub queued_send {
             if ( ! exists $self->{sockets}{$sockid}  ) {
                 next;
             }
-            if ( ! getpeername($self->{sockets}{$sockid}[S_FH]) ) {
+            if ( _getpeername($self->{sockets}{$sockid}[S_FD], my $addr) < 0 ) {
                 delete $self->{sockets}{$sockid};
                 next;
             }
             my $ret = IO::FDPass::send(
                 fileno $self->{lstn_pipe}[WRITER],
-                fileno $self->{sockets}{$sockid}[S_FH]
+                $self->{sockets}{$sockid}[S_FD]
             );
             if ( !$ret  ) {
                 if ( $! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR ) {
@@ -318,7 +319,7 @@ sub connection_manager {
                         $self->{sockets}{$sockid}[S_TIME] = time;
                         $self->{sockets}{$sockid}[S_REQS] += $reqs;
                         $self->{sockets}{$sockid}[S_STATE] = 0;
-                        $wait_read{$sockid} = AE::io $self->{sockets}{$sockid}[S_FH], 0, sub {
+                        $wait_read{$sockid} = AE::io $self->{sockets}{$sockid}[S_FD], 0, sub {
                             delete $wait_read{$sockid};
                             $self->queued_send($sockid);
                         };
@@ -341,23 +342,24 @@ sub connection_manager {
                     warn sprintf 'Failed recv fd: %s (%d)', $!, $!;
                     $error = 1;
                 }
-                my $fh;
-                if ( !$error ) {
-                    open($fh, '+<&=', $fd);
-                    if ( !$fh ) {
-                        warn "unable to convert file descriptor to handle: $!";
-                        $error = 1;
-                    }
-                }
+                #my $fh;
+                #if ( !$error ) {
+                #    open($fh, '+<&=', $fd);
+                #    if ( !$fh ) {
+                #        warn "unable to convert file descriptor to handle: $!";
+                #        $error = 1;
+                #    }
+                #}
                 return if $error;
-                $self->{sockets}{$sockid} = [ 
-                    $fh,
+                $self->{sockets}{$sockid} = [
+                    AnyEvent::Util::guard { POSIX::close($fd) },
+                    $fd,
                     time,
                     $reqs,
                     0
                 ]; #guard,fd,time,reqs,state
                 $self->update_sock_stat();
-                $wait_read{$sockid} = AE::io $fh, 0, sub {
+                $wait_read{$sockid} = AE::io $fd, 0, sub {
                     delete $wait_read{$sockid};
                     $self->queued_send($sockid);
                 };
@@ -553,7 +555,7 @@ sub request_worker {
                 }
 
                 # read ahread
-                if ( 0 && $proc_req_count < $max_reqs_per_child ) {
+                if ( $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
