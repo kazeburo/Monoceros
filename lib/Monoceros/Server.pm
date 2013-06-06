@@ -548,7 +548,8 @@ sub request_worker {
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
-                                                         $may_keepalive, $is_keepalive, $prebuf, $conn->{direct});
+                                                         $may_keepalive, $is_keepalive, $prebuf, 
+                                                         $conn->{direct}, $conn->{reqs});
                 $conn->{reqs}++;
                 if ( !$keepalive ) {
                     #close
@@ -672,7 +673,7 @@ sub accept_or_recv {
 }
 
 sub handle_connection {
-    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf, $direct) = @_;
+    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf, $direct, $reqs) = @_;
     
     my $buf = '';
     my $pipelined_buf='';
@@ -711,7 +712,7 @@ sub handle_connection {
                         $use_keepalive = undef;
                     }
                 }
-                if ( $use_keepalive ) {
+                if ( $use_keepalive && $reqs <= 1 ) {
                     $use_keepalive = $self->can_keepalive;
                 }
             }
