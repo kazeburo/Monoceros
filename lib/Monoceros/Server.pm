@@ -197,9 +197,9 @@ sub update_sock_stat {
     $prev_state = $state;
 }
 
-sub read_sock_stat {
+sub can_keepalive {
    my $self = shift;
-   return -l $self->{sock_stat_link};
+   return ! -l $self->{sock_stat_link};
 }
 
 sub connection_manager {
@@ -279,26 +279,34 @@ sub connection_manager {
         $self->update_sock_stat();
     };
 
+    my %m_state;
     $manager{internal_server} = AE::io $self->{internal_server}, 0, sub {
         my $sock = $self->{internal_server}->accept;
         fh_nonblocking($sock,1);
         return unless $sock;
-        my $buf = '';
-        my $state = 'cmd';
-        my $sockid;
-        my $reqs;
+
+        my $wid = $sock->fileno;
+        $m_state{$wid} = {};
+        my $state = $m_state{$wid};
+        $state->{buf} = '';
+        $state->{state} = 'cmd';
+        $state->{sockid} = '';
+        $state->{reqs} = 0;
+        
         my $ws; $ws = AE::io fileno $sock, 0, sub {
-            if ( $state eq 'cmd' ) {
-                my $len = sysread($sock, $buf, 28 - length($buf), length($buf));
+            if ( $state->{state} eq 'cmd' ) {
+                my $len = sysread($sock, $state->{buf}, 28 - length($state->{buf}), length($state->{buf}));
                 if ( defined $len && $len == 0 ) {
                     undef $ws;
+                    delete $m_state{$sock->fileno};
                     return;
                 }
-                return if length $buf < 28;
-                my $msg = substr $buf, 0, 28, '';
+                return if length $state->{buf} < 28;
+                my $msg = substr $state->{buf}, 0, 28, '';
                 my $method = substr($msg, 0, 4,'');
-                $sockid = substr($msg, 0, 16, '');
-                $reqs = hex($msg);
+                my $sockid = substr($msg, 0, 16, '');
+                my $reqs = hex($msg);
+
                 # stat
                 if ( $method eq 'stat' ) {
                     my $processing = scalar grep { !$self->{sockets}{$_}[S_STATE] == 1 } keys %{$self->{sockets}};
@@ -312,7 +320,9 @@ sub connection_manager {
                 }
 
                 if ( $method eq 'push' ) {
-                    $state = 'recv_fd';
+                    $state->{state} = 'recv_fd';
+                    $state->{sockid} = $sockid;
+                    $state->{reqs} = $reqs;
                 }
                 elsif ( $method eq 'keep' ) {
                     if ( exists $self->{sockets}{$sockid} ) {
@@ -331,17 +341,19 @@ sub connection_manager {
                 }
             }
 
-            if ( $state eq 'recv_fd' ) {
+            if ( $state->{state} eq 'recv_fd' ) {
                 my $fd = IO::FDPass::recv(fileno $sock);
                 if ( $fd < 0 && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK) ) {
                     return;
                 }
-                $state = 'cmd';
+                $state->{state} = 'cmd';
                 my $error = 0;
                 if ( $fd <= 0 ) {
                     warn sprintf 'Failed recv fd: %s (%d)', $!, $!;
                     $error = 1;
                 }
+                my $sockid = $state->{sockid};
+                my $reqs = $state->{reqs};
                 #my $fh;
                 #if ( !$error ) {
                 #    open($fh, '+<&=', $fd);
@@ -465,7 +477,6 @@ sub request_worker {
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
-            $self->{stop_keepalive} = $self->read_sock_stat;
 
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
                 last if ( $self->{term_received} 
@@ -484,7 +495,6 @@ sub request_worker {
                     }
                     #read ahread. but still cannot read
                     $self->keep_it($next_conn) if $next_conn && !$conn;
-                    $self->{stop_keepalive} = $self->read_sock_stat;
                     #accept or recv
                     $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read )
                         unless $conn;
@@ -534,11 +544,11 @@ sub request_worker {
                 }
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
-                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept} || $self->{stop_keepalive});
+                $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept});
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
-                                                         $may_keepalive, $is_keepalive, $prebuf);
+                                                         $may_keepalive, $is_keepalive, $prebuf, $conn->{direct});
                 $conn->{reqs}++;
                 if ( !$keepalive ) {
                     #close
@@ -554,8 +564,8 @@ sub request_worker {
                     next;
                 }
 
-                # read ahread
-                if ( $proc_req_count < $max_reqs_per_child ) {
+                # read ahead
+                if ( 0 && $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
@@ -588,8 +598,8 @@ sub request_worker {
 }
 
 sub cmd_to_mgr {
-    my ($self, $cmd,$peername,$reqs) = @_;
-    my $msg = "$cmd".md5($peername).sprintf('%08x',$reqs);
+    my ($self,$cmd,$peername,$reqs) = @_;
+    my $msg = $cmd . Digest::MD5::md5($peername) . sprintf('%08x',$reqs);
     $self->write_all($self->{mgr_sock}, $msg, $self->{timeout}) or die $!;
 }
 
@@ -621,7 +631,7 @@ sub accept_or_recv {
                 next;
             }
             next unless $fh;
-            fh_nonblocking($fh,1);
+            $fh->blocking(0);
             setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                 or die "setsockopt(TCP_NODELAY) failed:$!";
             $conn = {
@@ -638,10 +648,10 @@ sub accept_or_recv {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
             next if $fd <= 0;
-            open(my $fh, '<&='.$fd)
+            my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
                 or die "unable to convert file descriptor to handle: $!";
-            my $ret = _getpeername($fd, my $peer);
-            if ( $ret < 0 ) {
+            my $peer = getpeername($fh);
+            if ( !$peer ) {
                 #warn "cannot get peername. already closed?: $!";
                 #$self->cmd_to_mgr('clos', $sockname, 1);
                 next;
@@ -662,7 +672,7 @@ sub accept_or_recv {
 }
 
 sub handle_connection {
-    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf) = @_;
+    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf, $direct) = @_;
     
     my $buf = '';
     my $pipelined_buf='';
@@ -700,6 +710,9 @@ sub handle_connection {
                     } else {
                         $use_keepalive = undef;
                     }
+                }
+                if ( $use_keepalive ) {
+                    $use_keepalive = $self->can_keepalive;
                 }
             }
             $buf = substr $buf, $reqlen;
@@ -841,6 +854,7 @@ sub _handle_response {
             }            
         }
         push @lines, "Connection: keep-alive\015\012" if $$use_keepalive_r;
+        push @lines, "Connection: close\015\012" if !$$use_keepalive_r; #fmm..
     }
     elsif ( $protocol eq 'HTTP/1.1' ) {
         if (defined $send_headers{'content-length'}
