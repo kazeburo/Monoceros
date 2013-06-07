@@ -73,7 +73,7 @@ sub new {
         timeout              => $args{timeout} || 300,
         keepalive_timeout    => $args{keepalive_timeout} || 10,
         max_keepalive_connection => $args{max_keepalive_connection} || int($open_max/2),
-        read_ahead_power   => $args{read_ahead_power} || 0.5,
+        max_readahead_reqs   => $args{max_readahead_reqs} || 100,
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
         min_reqs_per_child   => (
@@ -566,7 +566,7 @@ sub request_worker {
                 }
 
                 # read ahead
-                if ( $proc_req_count < $max_reqs_per_child ) {
+                if ( $conn->{reqs} < $self->{max_readahead_reqs} &&  $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
