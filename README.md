@@ -36,7 +36,7 @@ And this server inherit [Starlet](http://search.cpan.org/perldoc?Starlet). Monoc
 
 \- fast HTTP processing using [HTTP::Parser::XS](http://search.cpan.org/perldoc?HTTP::Parser::XS) (optional)
 
-But Monoceros does not support spawn-interval.
+Currently, Monoceros does not support spawn-interval and max-keepalive-reqs.
 
 # COMMAND LINE OPTIONS
 
@@ -63,17 +63,13 @@ max. number of requests to be handled before a worker process exits (default: 10
 
 if set, randomizes the number of requests handled by a single worker process between the value and that supplied by `--max-reqs-per-chlid` (default: none)
 
-## \--max-keepalive-reqs=\#
-
-max. number of requests allowed per single persistent connection.  If set to one, persistent connections are disabled (default: 100)
-
 ## \--max-keepalive-connection=\#
 
-number of connections to keep in the manager process. If you want to increase this value, You should check your system limitations. (default: half number of POSIX::\_SC\_OPEN\_MAX)
+max, number of connections to keep in the manager process. If you want to increase this value, You should check your system limitations. (default: half number of POSIX::\_SC\_OPEN\_MAX)
 
-## \--read-ahead-power=\#
+## \--max-readahead-reqs=\#
 
-floating number in 0 to 1. rate to read ahead request. If set to high number, Monoceros attempts to read the next request from current socket strongly. Result, throughput is higher. Conversely, For small delay, set low number. Monoceros attempts to read a request from other sockets. (default: 0.5)
+max. number of requests to continue to read a request in a worker process. Monoceros can read a next request after the response for maximum throughput. (default: 100)
 
 # RECOMMENDED MODULES
 

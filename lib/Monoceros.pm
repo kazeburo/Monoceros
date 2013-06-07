@@ -82,7 +82,7 @@ max, number of connections to keep in the manager process. If you want to increa
 
 =head2 --max-readahead-reqs=#
 
-max. number of requests to continue to read a request in a worker process. Monoceros can read a next request after responsing for maximum throughput. But. (default: 100)
+max. number of requests to continue to read a request in a worker process. Monoceros can read a next request after the response for maximum throughput. (default: 100)
 
 =head1 RECOMMENDED MODULES
 

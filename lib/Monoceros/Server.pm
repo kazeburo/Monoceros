@@ -274,8 +274,6 @@ sub connection_manager {
                 delete $self->{sockets}{$key};
             }
         }
-#        use Data::Dumper;
-#warn Dumper([map { $self->{sockets}{$_} } grep { $self->{sockets}{$_}[S_STATE] == 0 } keys %{$self->{sockets}}]) ;
         $self->update_sock_stat();
     };
 
@@ -314,7 +312,8 @@ sub connection_manager {
                     my $total = $processing + $idle;
                     my $msg = "Total: $total\015\012";
                     $msg .= "Waiting: $idle\015\012";
-                    $msg .= "Processing: $processing\015\012\015\012";
+                    $msg .= "Processing: $processing\015\012";
+                    $msg .= "MaxWorkers: ".$self->{max_workers}."\015\012\015\012";
                     $self->write_all_aeio($sock, $msg, $self->{timeout});
                     return;
                 }
@@ -347,22 +346,12 @@ sub connection_manager {
                     return;
                 }
                 $state->{state} = 'cmd';
-                my $error = 0;
                 if ( $fd <= 0 ) {
                     warn sprintf 'Failed recv fd: %s (%d)', $!, $!;
-                    $error = 1;
+                    return;
                 }
                 my $sockid = $state->{sockid};
                 my $reqs = $state->{reqs};
-                #my $fh;
-                #if ( !$error ) {
-                #    open($fh, '+<&=', $fd);
-                #    if ( !$fh ) {
-                #        warn "unable to convert file descriptor to handle: $!";
-                #        $error = 1;
-                #    }
-                #}
-                return if $error;
                 $self->{sockets}{$sockid} = [
                     AnyEvent::Util::guard { POSIX::close($fd) },
                     $fd,
@@ -653,8 +642,6 @@ sub accept_or_recv {
                 or die "unable to convert file descriptor to handle: $!";
             my $peer = getpeername($fh);
             if ( !$peer ) {
-                #warn "cannot get peername. already closed?: $!";
-                #$self->cmd_to_mgr('clos', $sockname, 1);
                 next;
             }
             $conn = {
