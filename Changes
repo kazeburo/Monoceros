@@ -2,6 +2,12 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.17 2013-06-07T01:50:12Z
+
+  - support max-readahead-reqs option
+  - change status content in MonocerosStatus
+  - require POSIX::getpeername
+
 0.16 2013-05-28T01:04:48Z
 
   - remove sockfile at process exit
