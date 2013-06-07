@@ -4,14 +4,6 @@ use Plack::Test;
 use HTTP::Request;
 use Test::More;
 
-{
-    no warnings 'redefine';
-    *Test::TCP::wait_port = sub {
-        my $port = shift;
-        Net::EmptyPort::wait_port($port, 0.1, 40) 
-                or die "cannot open port: $port";
-    };
-}
 
 $Plack::Test::Impl = "Server";
 $ENV{PLACK_SERVER} = 'Monoceros';
