@@ -8,6 +8,7 @@ use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
 use AnyEvent::Util qw(fh_nonblocking);
+use AnyEvent::IO qw(:DEFAULT :flags);
 use Time::HiRes qw/time/;
 use Carp ();
 use Plack::TempBuffer;
@@ -194,13 +195,14 @@ sub update_sock_stat {
     my $self = shift;
     my $state = scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection};
     return if $state eq $prev_state;
+    $prev_state = $state;
     if ( $state ) {
-        unlink $self->{sock_stat_link};
+        aio_unlink $self->{sock_stat_link}, sub {};
     }
     else {
-        symlink $self->{worker_sock}, $self->{sock_stat_link};
+        aio_symlink $self->{worker_sock}, $self->{sock_stat_link}, sub {};
     }
-    $prev_state = $state;
+    
 }
 
 sub can_keepalive {
@@ -341,7 +343,7 @@ sub connection_manager {
                 }
                 elsif ( $method eq 'keep' ) {
                     if ( exists $self->{sockets}{$sockid} ) {
-                        $self->{sockets}{$sockid}[S_TIME] = time;
+                        $self->{sockets}{$sockid}[S_TIME] = AnyEvent->now;
                         $self->{sockets}{$sockid}[S_REQS] += $reqs;
                         $self->{sockets}{$sockid}[S_STATE] = 0;
                         $wait_read{$sockid} = AE::io $self->{sockets}{$sockid}[S_FD], 0, sub {
@@ -352,7 +354,7 @@ sub connection_manager {
                 }
                 elsif ( $method eq 'clos' ) {
                     delete $self->{sockets}{$sockid};
-                    $self->update_sock_stat();   
+                    $self->update_sock_stat();
                 }
             }
 
@@ -371,14 +373,14 @@ sub connection_manager {
                 $self->{sockets}{$sockid} = [
                     AnyEvent::Util::guard { POSIX::close($fd) },
                     $fd,
-                    time,
+                    AnyEvent->now,
                     $reqs,
                     0
                 ]; #guard,fd,time,reqs,state
                 $self->update_sock_stat();
                 $wait_read{$sockid} = AE::io $fd, 0, sub {
                     delete $wait_read{$sockid};
-                    $self->queued_send($sockid);
+                    $self->queued_send($sockid); 
                 };
             } # cmd
         } # AE::io
