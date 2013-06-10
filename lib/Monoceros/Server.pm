@@ -299,12 +299,22 @@ sub connection_manager {
         
         my $ws; $ws = AE::io fileno $sock, 0, sub {
             if ( $state->{state} eq 'cmd' ) {
-                my $len = sysread($sock, $state->{buf}, 28 - length($state->{buf}), length($state->{buf}));
-                if ( defined $len && $len == 0 ) {
-                    undef $ws;
-                    delete $m_state{$sock->fileno};
+                my $ret = recv($sock, my $buf, 28 - length($state->{buf}), 0);
+                if ( !defined $ret && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK) ) {
                     return;
                 }
+                if ( !defined $ret ) {
+                    warn "failed to recv from sock: $!";
+                    undef $ws;
+                    delete $m_state{$sock->fileno};
+                    return;                                        
+                }
+                if ( defined $buf && length $buf == 0) {
+                    undef $ws;
+                    delete $m_state{$sock->fileno};
+                    return;                    
+                }
+                $state->{buf} .= $buf;
                 return if length $state->{buf} < 28;
                 my $msg = substr $state->{buf}, 0, 28, '';
                 my $method = substr($msg, 0, 4,'');
@@ -619,7 +629,12 @@ sub request_worker {
 sub cmd_to_mgr {
     my ($self,$cmd,$peername,$reqs) = @_;
     my $msg = $cmd . Digest::MD5::md5($peername) . sprintf('%08x',$reqs);
-    $self->write_all($self->{mgr_sock}, $msg, $self->{timeout}) or die $!;
+    my $ret;
+    do {
+        $ret = send($self->{mgr_sock}, $msg, 0);
+        die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK && $! != EINTR);
+        #need select
+    } while (!$ret);
 }
 
 sub keep_it {
