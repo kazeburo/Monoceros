@@ -4,7 +4,6 @@ use strict;
 use warnings;
 use base qw/Plack::Handler::Starlet/;
 use IO::Socket;
-use IO::Select;
 use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
@@ -444,10 +443,11 @@ sub request_worker {
                 $self->{lstn_pipe}[READER]->fileno => 1,
                 $self->{listen_sock}->fileno => 1,
             );
-            $self->{select} = IO::Select->new(
-                $self->{lstn_pipe}[READER],
-                $self->{listen_sock}
-            );
+            $self->{fhlist} = [$self->{lstn_pipe}[READER], $self->{listen_sock}];
+            $self->{fhbits} = '';
+            for ( @{$self->{fhlist}} ) {
+                vec($self->{fhbits}, fileno($_), 1) = 1;
+            }
 
             $self->{mgr_sock} = IO::Socket::UNIX->new(
                 Type => SOCK_STREAM,
@@ -473,7 +473,9 @@ sub request_worker {
                 exit 0 if $self->{term_received} > 1;
             };
             local $SIG{USR1} = sub {
-                $self->{select}->remove($self->{listen_sock});
+                $self->{fhlist} = [$self->{lstn_pipe}[READER]];
+                $self->{fhbits} = '';
+                vec($self->{fhbits}, fileno($self->{lstn_pipe}[READER]), 1) = 1;
                 $self->{stop_accept}++;
             };
 
@@ -488,22 +490,36 @@ sub request_worker {
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #read ahead or pipeline
                     $conn = $next_conn;
+                    $next_conn = undef;
                 }
                 else {
-                    my @can_read = $self->{select}->can_read(1);
-                    for (@can_read) {
-                        if ( $next_conn && $_->fileno == $next_conn->{fh}->fileno ) {
-                            $conn = $next_conn;
+                    my @rfh = @{$self->{fhlist}};
+                    my $rfd = $self->{fhbits};
+                    if ( $next_conn ) {
+                        push @rfh, $next_conn->{fh};
+                        vec($rfd, fileno($next_conn->{fh}), 1) = 1;
+                    }                    
+                    my @can_read;
+                    if ( select($rfd, undef, undef, 1) > 0 ) {
+                        for ( my $i = 0; $i <= $#rfh; $i++ ) {
+                            if ( !defined $rfd || vec($rfd, fileno($rfh[$i]), 1) ) {
+                                my $can_read_conn = $rfh[$i];
+                                if ( $next_conn && fileno($next_conn->{fh}) == fileno($can_read_conn) ) {
+                                    $conn = $next_conn;
+                                    last;
+                                }
+                                push @can_read, $can_read_conn;
+                            }
                         }
                     }
                     #read ahead. but still cannot read
                     $self->keep_it($next_conn) if $next_conn && !$conn;
+                    @rfh = (); #close next_conn
+                    $next_conn = undef;
                     #accept or recv
-                    $conn = $self->accept_or_recv( grep { exists $sys_fileno{$_->fileno} } @can_read )
+                    $conn = $self->accept_or_recv( grep { exists $sys_fileno{fileno($_)} } @can_read )
                         unless $conn;
                 }
-                $self->{select}->remove($next_conn->{fh}) if $next_conn;
-                $next_conn = undef;
                 next unless $conn;
                 
                 ++$proc_req_count;
@@ -582,7 +598,6 @@ sub request_worker {
                              if !$conn->{direct};
                         next;
                     }
-                    $self->{select}->add($conn->{fh});
                     $next_conn = $conn;
                     next;
                 }
@@ -613,7 +628,7 @@ sub keep_it {
         $self->cmd_to_mgr("push", $conn->{peername}, $conn->{reqs});
         my $ret;
         do {
-            $ret = IO::FDPass::send($self->{mgr_sock}->fileno, $conn->{fh}->fileno);
+            $ret = IO::FDPass::send(fileno $self->{mgr_sock}, fileno $conn->{fh});
             die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK && $! != EINTR);
             #need select?
         } while (!$ret);
@@ -628,7 +643,7 @@ sub accept_or_recv {
     my @for_read = @_;
     my $conn;
     for my $pipe_or_sock ( @for_read ) {
-        if ( $pipe_or_sock->fileno == $self->{listen_sock}->fileno ) {
+        if ( fileno $pipe_or_sock == fileno $self->{listen_sock} ) {
             my ($fh,$peer) = $self->{listen_sock}->accept;
             if ( !$fh && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK && $! != ESPIPE) ) {
                 warn sprintf 'failed to accept: %s (%d)', $!, $!;
@@ -646,13 +661,13 @@ sub accept_or_recv {
             };
             last;
         }
-        elsif ( $pipe_or_sock->fileno == $self->{lstn_pipe}[READER]->fileno ) {
-            my $fd = IO::FDPass::recv($self->{lstn_pipe}[READER]->fileno);
+        elsif ( fileno $pipe_or_sock == fileno $self->{lstn_pipe}[READER] ) {
+            my $fd = IO::FDPass::recv(fileno $self->{lstn_pipe}[READER]);
             if ( $fd < 0 && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK && $! != ESPIPE) ) {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
             next if $fd <= 0;
-            my $fh = IO::Socket::INET->new_from_fd($fd,'r+')
+            open(my $fh, '+<&='.$fd)
                 or die "unable to convert file descriptor to handle: $!";
             my $peer = getpeername($fh);
             if ( !$peer ) {
