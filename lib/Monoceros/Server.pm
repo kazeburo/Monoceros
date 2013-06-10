@@ -73,7 +73,14 @@ sub new {
         timeout              => $args{timeout} || 300,
         keepalive_timeout    => $args{keepalive_timeout} || 10,
         max_keepalive_connection => $args{max_keepalive_connection} || int($open_max/2),
-        max_readahead_reqs   => $args{max_readahead_reqs} || 100,
+        max_readahead_reqs   => (
+            defined $args{max_readahead_reqs}
+                ? $args{max_readahead_reqs} : 100
+        ),
+        min_readahead_reqs   => (
+            defined $args{min_readahead_reqs}
+                ? $args{min_readahead_reqs} : undef,
+        ),
         server_software      => $args{server_software} || $class,
         server_ready         => $args{server_ready} || sub {},
         min_reqs_per_child   => (
@@ -433,7 +440,6 @@ sub request_worker {
 
     while ($pm->signal_received !~ /^(?:TERM|USR1)$/) {
         $pm->start(sub {
-            srand();
             my %sys_fileno = (
                 $self->{lstn_pipe}[READER]->fileno => 1,
                 $self->{listen_sock}->fileno => 1,
@@ -449,7 +455,15 @@ sub request_worker {
             ) or die "$!";
             $self->{mgr_sock}->blocking(0);
             
-            my $max_reqs_per_child = $self->_calc_reqs_per_child();
+            my $max_reqs_per_child = $self->_calc_minmax_per_child(
+                $self->{max_reqs_per_child},
+                $self->{min_reqs_per_child}
+            );
+            my $max_readahead_reqs = $self->_calc_minmax_per_child(
+                $self->{max_readahead_reqs},
+                $self->{min_readahead_reqs}
+            );
+
             my $proc_req_count = 0;
             
             $self->{term_received} = 0;
@@ -555,7 +569,7 @@ sub request_worker {
                 }
 
                 # read ahead
-                if ( $conn->{reqs} < $self->{max_readahead_reqs} &&  $proc_req_count < $max_reqs_per_child ) {
+                if ( $conn->{reqs} < $max_readahead_reqs &&  $proc_req_count < $max_reqs_per_child ) {
                     my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
@@ -915,6 +929,17 @@ sub _handle_response {
             close => sub {
                 $self->write_all($conn, '0' . "\015\012\015\012", $self->{timeout}) if $use_chunked;
             };
+    }
+}
+
+sub _calc_minmax_per_child {
+    my $self = shift;
+    my ($max,$min) = @_;
+    if (defined $min) {
+        srand((rand() * 2 ** 30) ^ $$ ^ time);
+        return $max - int(($max - $min + 1) * rand);
+    } else {
+        return $max;
     }
 }
 
