@@ -613,8 +613,7 @@ sub request_worker {
                 # wait
                 $self->keep_it($conn);
             }
-        });
-
+        }); #start
     }
     local $SIG{TERM} = sub {
         $pm->signal_all_children('TERM');
