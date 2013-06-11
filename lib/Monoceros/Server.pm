@@ -368,7 +368,7 @@ sub connection_manager {
                 my $sockid = $state->{sockid};
                 my $reqs = $state->{reqs};
                 $self->{sockets}{$sockid} = [
-                    AnyEvent::Util::guard { _close($fd) },
+                    AnyEvent::Util::guard { POSIX::close($fd) },
                     $fd,
                     AnyEvent->now,
                     $reqs,
@@ -448,14 +448,11 @@ sub request_worker {
 
     while ($pm->signal_received !~ /^(?:TERM|USR1)$/) {
         $pm->start(sub {
-            my %sys_fileno = (
-                $self->{lstn_pipe}[READER]->fileno => 1,
-                $self->{listen_sock}->fileno => 1,
-            );
             $self->{fhlist} = [$self->{lstn_pipe}[READER], $self->{listen_sock}];
+            $self->{fdlist} = [fileno $self->{lstn_pipe}[READER], fileno $self->{listen_sock}];
             $self->{fhbits} = '';
-            for ( @{$self->{fhlist}} ) {
-                vec($self->{fhbits}, fileno($_), 1) = 1;
+            for ( @{$self->{fdlist}} ) {
+                vec($self->{fhbits}, $_, 1) = 1;
             }
 
             $self->{mgr_sock} = IO::Socket::UNIX->new(
@@ -483,6 +480,7 @@ sub request_worker {
             };
             local $SIG{USR1} = sub {
                 $self->{fhlist} = [$self->{lstn_pipe}[READER]];
+                $self->{fdlist} = [fileno $self->{lstn_pipe}[READER]];
                 $self->{fhbits} = '';
                 vec($self->{fhbits}, fileno($self->{lstn_pipe}[READER]), 1) = 1;
                 $self->{stop_accept}++;
@@ -502,31 +500,30 @@ sub request_worker {
                     $next_conn = undef;
                 }
                 else {
-                    my @rfh = @{$self->{fhlist}};
+                    my @rfd = @{$self->{fdlist}};
                     my $rfd = $self->{fhbits};
                     if ( $next_conn ) {
-                        push @rfh, $next_conn->{fh};
-                        vec($rfd, fileno($next_conn->{fh}), 1) = 1;
+                        push @rfd, $next_conn->{fd};
+                        vec($rfd, $next_conn->{fd}, 1) = 1;
                     }                    
                     my @can_read;
                     if ( select($rfd, undef, undef, 1) > 0 ) {
-                        for ( my $i = 0; $i <= $#rfh; $i++ ) {
-                            if ( !defined $rfd || vec($rfd, fileno($rfh[$i]), 1) ) {
-                                my $can_read_conn = $rfh[$i];
-                                if ( $next_conn && fileno($next_conn->{fh}) == fileno($can_read_conn) ) {
+                        for ( my $i = 0; $i <= $#rfd; $i++ ) {
+                            if ( !defined $rfd || vec($rfd, $rfd[$i], 1) ) {
+                                my $can_read_fd = $rfd[$i];
+                                if ( $next_conn && $next_conn->{fd} == $can_read_fd ) {
                                     $conn = $next_conn;
                                     last;
                                 }
-                                push @can_read, $can_read_conn;
+                                push @can_read, $self->{fhlist}[$i];
                             }
                         }
                     }
                     #read ahead. but still cannot read
                     $self->keep_it($next_conn) if $next_conn && !$conn;
-                    @rfh = (); #close next_conn
                     $next_conn = undef;
                     #accept or recv
-                    $conn = $self->accept_or_recv( grep { exists $sys_fileno{fileno($_)} } @can_read )
+                    $conn = $self->accept_or_recv( @can_read )
                         unless $conn;
                 }
                 next unless $conn;
@@ -547,7 +544,6 @@ sub request_worker {
                     'psgi.streaming'    => Plack::Util::TRUE,
                     'psgi.nonblocking'  => Plack::Util::FALSE,
                     'psgix.input.buffered' => Plack::Util::TRUE,
-                    'psgix.io'          => $conn->{fh},
                     'X_MONOCEROS_WORKER_SOCK' => $self->{worker_sock},
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
@@ -557,12 +553,12 @@ sub request_worker {
                 }
                 else {
                     #pre-read
-                    my $ret = $conn->{fh}->sysread($prebuf, MAX_REQUEST_SIZE);
+                    my $ret = POSIX::read($conn->{fd}, $prebuf, MAX_REQUEST_SIZE);
                     if ( ! defined $ret && ($! == EAGAIN || $! == EWOULDBLOCK || $! == EINTR) ) {
                         $self->keep_it($conn);
                         next;
                     }
-                    elsif ( defined $ret && $ret == 0 ) {
+                    elsif ( defined $ret && $ret == 0) {
                         #closed
                         $self->cmd_to_mgr('clos', $conn->{peername}, $conn->{reqs}) 
                             if !$conn->{direct};
@@ -574,7 +570,7 @@ sub request_worker {
                 $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept});
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
-                my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
+                my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fd}, $app, 
                                                          $may_keepalive, $is_keepalive, $prebuf, 
                                                          $conn->{reqs});
                 $conn->{reqs}++;
@@ -594,13 +590,13 @@ sub request_worker {
 
                 # read ahead
                 if ( $conn->{reqs} < $max_readahead_reqs &&  $proc_req_count < $max_reqs_per_child ) {
-                    my $ret = $conn->{fh}->sysread(my $buf, MAX_REQUEST_SIZE);
+                    my $ret = POSIX::read($conn->{fd}, my $buf, MAX_REQUEST_SIZE);
                     if ( defined $ret && $ret > 0 ) {
                         $next_conn = $conn;
                         $next_conn->{buf} = $buf;
                         next;
                     }
-                    elsif ( defined $ret && $ret == 0 ) {
+                    elsif ( defined $ret ) {
                         #closed?
                         $self->cmd_to_mgr('clos', $conn->{peername}, $conn->{reqs})
                              if !$conn->{direct};
@@ -635,7 +631,7 @@ sub keep_it {
         $self->cmd_to_mgr("push", $conn->{peername}, $conn->{reqs});
         my $ret;
         do {
-            $ret = IO::FDPass::send(fileno $self->{mgr_sock}, fileno $conn->{fh});
+            $ret = IO::FDPass::send(fileno $self->{mgr_sock}, $conn->{fd});
             die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK && $! != EINTR);
             #need select?
         } while (!$ret);
@@ -663,7 +659,8 @@ sub accept_or_recv {
             my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
             my $peeraddr = inet_ntoa($peerhost);
             $conn = {
-                fh => $fh,
+                fd => fileno $fh,
+                guard => $fh,
                 peername => $peer,
                 peerport => $peerport,
                 peeraddr => $peeraddr,
@@ -678,8 +675,6 @@ sub accept_or_recv {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
             next if $fd <= 0;
-            open(my $fh, '<&='.$fd.':unix')
-                or die "unable to convert file descriptor to handle: $!";
             my $peer; 
             if ( _getpeername($fd, $peer) < 0 ) {
                 next;
@@ -687,7 +682,8 @@ sub accept_or_recv {
             my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
             my $peeraddr = inet_ntoa($peerhost);
             $conn = {
-                fh => $fh,
+                fd => $fd,
+                guard => AnyEvent::Util::guard { POSIX::close($fd) },
                 peername => $peer,
                 peerport => $peerport,
                 peeraddr => $peeraddr,
@@ -698,8 +694,6 @@ sub accept_or_recv {
         }
     }
     return unless $conn;
-    return unless $conn->{fh};
-    return unless $conn->{peername};
     $conn;
 }
 
@@ -973,5 +967,47 @@ sub _calc_minmax_per_child {
     }
 }
 
+# returns value returned by $cb, or undef on timeout or network error
+sub do_io {
+    my ($self, $is_write, $fd, $buf, $len, $off, $timeout) = @_;
+    my $ret;
+    unless ($is_write || delete $self->{_is_deferred_accept}) {
+        goto DO_SELECT;
+    }
+ DO_READWRITE:
+    # try to do the IO
+    if ($is_write) {
+        $ret = POSIX::write($fd, $buf, $len);
+        return $ret if defined $ret && $ret > 0;
+    } else {
+        $ret = POSIX::read($fd, my $read_buf, $len);
+        if ( defined $ret && $ret > 0 ) {
+            substr($$buf, $off, -1, $read_buf);
+            return $ret;
+        }
+    }
+    if ( ! defined $ret && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK) ) {
+        #error
+        return;
+    }
+    # wait for data
+ DO_SELECT:
+    while (1) {
+        my ($rfd, $wfd);
+        my $efd = '';
+        vec($efd, $fd, 1) = 1;
+        if ($is_write) {
+            ($rfd, $wfd) = ('', $efd);
+        } else {
+            ($rfd, $wfd) = ($efd, '');
+        }
+        my $start_at = time;
+        my $nfound =  select($rfd, $wfd, $efd, $timeout);
+        $timeout -= (time - $start_at);
+        last if $nfound;
+        return if $timeout <= 0;
+    }
+    goto DO_READWRITE;
+}
 
 1;
