@@ -8,7 +8,6 @@ use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
 use AnyEvent::Util qw(fh_nonblocking);
-use AnyEvent::IO qw(:DEFAULT :flags);
 use Time::HiRes qw/time/;
 use Carp ();
 use Plack::TempBuffer;
@@ -197,10 +196,10 @@ sub update_sock_stat {
     return if $state eq $prev_state;
     $prev_state = $state;
     if ( $state ) {
-        aio_unlink $self->{sock_stat_link}, sub {};
+        unlink $self->{sock_stat_link};
     }
     else {
-        aio_symlink $self->{worker_sock}, $self->{sock_stat_link}, sub {};
+        symlink $self->{sock_stat_link}.".$$", $self->{sock_stat_link};
     }
     
 }
