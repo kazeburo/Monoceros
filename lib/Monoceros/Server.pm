@@ -15,6 +15,7 @@ use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS :sys_wait_h);
 use POSIX::getpeername qw/_getpeername/;
+use POSIX::Socket;
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 use Digest::MD5 qw/md5/;
@@ -300,7 +301,7 @@ sub connection_manager {
         
         my $ws; $ws = AE::io fileno $sock, 0, sub {
             if ( $state->{state} eq 'cmd' ) {
-                my $ret = recv($sock, my $buf, 28 - length($state->{buf}), 0);
+                my $ret = _recv(fileno($sock), my $buf, 28 - length($state->{buf}), 0);
                 if ( !defined $ret && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK) ) {
                     return;
                 }
@@ -367,7 +368,7 @@ sub connection_manager {
                 my $sockid = $state->{sockid};
                 my $reqs = $state->{reqs};
                 $self->{sockets}{$sockid} = [
-                    AnyEvent::Util::guard { POSIX::close($fd) },
+                    AnyEvent::Util::guard { _close($fd) },
                     $fd,
                     AnyEvent->now,
                     $reqs,
@@ -625,12 +626,7 @@ sub request_worker {
 sub cmd_to_mgr {
     my ($self,$cmd,$peername,$reqs) = @_;
     my $msg = $cmd . Digest::MD5::md5($peername) . sprintf('%08x',$reqs);
-    my $ret;
-    do {
-        $ret = send($self->{mgr_sock}, $msg, 0);
-        die $! if ( !defined $ret && $! != EAGAIN && $! != EWOULDBLOCK && $! != EINTR);
-        #need select
-    } while (!$ret);
+    _sendn(fileno($self->{mgr_sock}), $msg, 0);
 }
 
 sub keep_it {
@@ -682,10 +678,10 @@ sub accept_or_recv {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
             next if $fd <= 0;
-            open(my $fh, '<&='.$fd)
+            open(my $fh, '<&='.$fd.':unix')
                 or die "unable to convert file descriptor to handle: $!";
-            my $peer = getpeername($fh);
-            if ( !$peer ) {
+            my $peer; 
+            if ( _getpeername($fd, $peer) < 0 ) {
                 next;
             }
             my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
