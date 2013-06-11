@@ -982,6 +982,7 @@ sub do_io {
         $ret = POSIX::read($fd, my $read_buf, $len);
         return if defined $ret && $ret == 0;
         if ( $ret ) {
+            $$buf = '' unless defined $$buf;
             substr($$buf, $off, -1, $read_buf);
             return $ret;
         }
