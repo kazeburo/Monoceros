@@ -2,6 +2,11 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.18 2013-06-11T06:12:22Z
+
+  - support min-readahead-reqs option
+  - requires Test::TCP >= 2.00
+
 0.17 2013-06-07T01:50:12Z
 
   - support max-readahead-reqs option
