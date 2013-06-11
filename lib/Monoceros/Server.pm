@@ -323,19 +323,6 @@ sub connection_manager {
                 my $sockid = substr($msg, 0, 16, '');
                 my $reqs = hex($msg);
 
-                # stat
-                if ( $method eq 'stat' ) {
-                    my $processing = scalar grep { !$self->{sockets}{$_}[S_STATE] == 1 } keys %{$self->{sockets}};
-                    my $idle = scalar grep { $self->{sockets}{$_}[S_STATE] == 0 } keys %{$self->{sockets}};
-                    my $total = $processing + $idle;
-                    my $msg = "Total: $total\015\012";
-                    $msg .= "Waiting: $idle\015\012";
-                    $msg .= "Processing: $processing\015\012";
-                    $msg .= "MaxWorkers: ".$self->{max_workers}."\015\012\015\012";
-                    $self->write_all_aeio($sock, $msg, $self->{timeout});
-                    return;
-                }
-
                 if ( $method eq 'push' ) {
                     $state->{state} = 'recv_fd';
                     $state->{sockid} = $sockid;
@@ -355,6 +342,16 @@ sub connection_manager {
                 elsif ( $method eq 'clos' ) {
                     delete $self->{sockets}{$sockid};
                     $self->update_sock_stat();
+                }
+                elsif ( $method eq 'stat' ) {
+                    my $processing = scalar grep { !$self->{sockets}{$_}[S_STATE] == 1 } keys %{$self->{sockets}};
+                    my $idle = scalar grep { $self->{sockets}{$_}[S_STATE] == 0 } keys %{$self->{sockets}};
+                    my $total = $processing + $idle;
+                    my $msg = "Total: $total\015\012";
+                    $msg .= "Waiting: $idle\015\012";
+                    $msg .= "Processing: $processing\015\012";
+                    $msg .= "MaxWorkers: ".$self->{max_workers}."\015\012\015\012";
+                    $self->write_all_aeio($sock, $msg, $self->{timeout});
                 }
             }
 
@@ -580,7 +577,7 @@ sub request_worker {
                                       #  treat every connection as keepalive
                 my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
                                                          $may_keepalive, $is_keepalive, $prebuf, 
-                                                         $conn->{direct}, $conn->{reqs});
+                                                         $conn->{reqs});
                 $conn->{reqs}++;
                 if ( !$keepalive ) {
                     #close
@@ -686,7 +683,7 @@ sub accept_or_recv {
             next if $fd <= 0;
             open(my $fh, '+<&='.$fd)
                 or die "unable to convert file descriptor to handle: $!";
-            my $peer = getpeername($fh);
+            _getpeername($fh, my $peer);
             if ( !$peer ) {
                 next;
             }
@@ -706,7 +703,7 @@ sub accept_or_recv {
 }
 
 sub handle_connection {
-    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf, $direct, $reqs) = @_;
+    my($self, $env, $conn, $app, $use_keepalive, $is_keepalive, $prebuf, $reqs) = @_;
     
     my $buf = '';
     my $pipelined_buf='';
