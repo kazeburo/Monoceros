@@ -16,6 +16,7 @@ use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS :sys_wait_h);
 use POSIX::getpeername qw/_getpeername/;
 use POSIX::Socket;
+use Fcntl;
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 use Digest::MD5 qw/md5/;
@@ -679,6 +680,7 @@ sub accept_or_recv {
             if ( _getpeername($fd, $peer) < 0 ) {
                 next;
             }
+            _fcntl($fd, F_SETFD, FD_CLOEXEC);
             my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
             my $peeraddr = inet_ntoa($peerhost);
             $conn = {
