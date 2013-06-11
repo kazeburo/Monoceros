@@ -681,9 +681,9 @@ sub accept_or_recv {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
             next if $fd <= 0;
-            open(my $fh, '+<&='.$fd)
+            open(my $fh, '<&='.$fd)
                 or die "unable to convert file descriptor to handle: $!";
-            _getpeername($fd, my $peer);
+            my $peer = getpeername($fh);
             if ( !$peer ) {
                 next;
             }
