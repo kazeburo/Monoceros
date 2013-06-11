@@ -2,6 +2,11 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.19 2013-06-11T17:18:23Z
+
+  - use file stat instead of symlink
+  - back fdopen in worker. error occurred in *bsd 
+
 0.18 2013-06-11T06:12:22Z
 
   - support min-readahead-reqs option
