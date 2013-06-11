@@ -532,13 +532,12 @@ sub request_worker {
                 next unless $conn;
                 
                 ++$proc_req_count;
-                my ($peerport,$peerhost) = unpack_sockaddr_in $conn->{peername};
                 my $env = {
                     SERVER_PORT => $self->{port},
                     SERVER_NAME => $self->{host},
                     SCRIPT_NAME => '',
-                    REMOTE_ADDR => inet_ntoa($peerhost),
-                    REMOTE_PORT => $peerport,
+                    REMOTE_ADDR => $conn->{peeraddr},
+                    REMOTE_PORT => $conn->{peerport},
                     'psgi.version' => [ 1, 1 ],
                     'psgi.errors'  => *STDERR,
                     'psgi.url_scheme' => 'http',
@@ -667,9 +666,13 @@ sub accept_or_recv {
             $fh->blocking(0);
             setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                 or die "setsockopt(TCP_NODELAY) failed:$!";
+            my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
+            my $peeraddr = inet_ntoa($peerhost);
             $conn = {
                 fh => $fh,
                 peername => $peer,
+                peerport => $peerport,
+                peeraddr => $peeraddr,
                 direct => 1,
                 reqs => 0,
             };
@@ -687,9 +690,13 @@ sub accept_or_recv {
             if ( !$peer ) {
                 next;
             }
+            my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
+            my $peeraddr = inet_ntoa($peerhost);
             $conn = {
                 fh => $fh,
                 peername => $peer,
+                peerport => $peerport,
+                peeraddr => $peeraddr,
                 direct => 0,
                 reqs => 1, #xx
             };
