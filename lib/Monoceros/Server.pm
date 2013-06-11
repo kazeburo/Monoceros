@@ -683,7 +683,7 @@ sub accept_or_recv {
             next if $fd <= 0;
             open(my $fh, '+<&='.$fd)
                 or die "unable to convert file descriptor to handle: $!";
-            _getpeername($fh, my $peer);
+            _getpeername($fd, my $peer);
             if ( !$peer ) {
                 next;
             }
