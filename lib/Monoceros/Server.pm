@@ -977,16 +977,16 @@ sub do_io {
  DO_READWRITE:
     # try to do the IO
     if ($is_write) {
-        $ret = POSIX::write($fd, $buf, $len);
-        return $ret if defined $ret && $ret > 0;
+        $ret = POSIX::write($fd, $buf, $len) and return $ret;
     } else {
         $ret = POSIX::read($fd, my $read_buf, $len);
-        if ( defined $ret && $ret > 0 ) {
+        return if defined $ret && $ret == 0;
+        if ( $ret ) {
             substr($$buf, $off, -1, $read_buf);
             return $ret;
         }
     }
-    if ( ! defined $ret && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK) ) {
+    if ( !$ret && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK) ) {
         #error
         return;
     }
