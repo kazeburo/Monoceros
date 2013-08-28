@@ -9,14 +9,12 @@ use Parallel::Prefork;
 use AnyEvent;
 use AnyEvent::Util qw(fh_nonblocking);
 use Time::HiRes qw/time/;
-use Carp ();
 use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS :sys_wait_h);
 use POSIX::getpeername qw/_getpeername/;
 use POSIX::Socket;
-use Fcntl;
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 use Digest::MD5 qw/md5/;
@@ -32,12 +30,9 @@ use constant S_STATE => 4; # 0:idle 1:queue
 
 use constant MAX_REQUEST_SIZE => 131072;
 use constant CHUNKSIZE    => 64 * 1024;
-
 use constant DEBUG        => $ENV{MONOCEROS_DEBUG} || 0;
 
 my $null_io = do { open my $io, "<", \""; $io };
-my %ok_accept_errno = map { $_ => 1 } (EAGAIN, EWOULDBLOCK, ESPIPE, EINTR);
-my %ok_recv_errno = map { $_ => 1 } (EAGAIN, EWOULDBLOCK, EINTR);
 
 sub new {
     my $class = shift;
@@ -112,25 +107,25 @@ sub run {
 sub setup_sockpair {
     my $self = shift;
 
-    my ($fh, $filename) = tempfile('monoceros_internal_XXXXXX',UNLINK => 0, SUFFIX => '.sock', TMPDIR => 1);
-    close($fh);
-    unlink($filename);
-    $self->{worker_sock} = $filename;
-    my $sock = IO::Socket::UNIX->new(
-        Type => SOCK_STREAM,
-        Listen => Socket::SOMAXCONN(),
-        Local => $filename,
-    ) or die $!;
-    $self->{internal_server} = $sock;
+    my %workers;
+    for my $wid ( 1..$self->{max_workers} ) {
+        my @pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
+            or die "failed to create socketpair: $!";
+        $workers{$wid} = {
+            running => 0,
+            pipe => \@pipe
+        };
+    }
+    $self->{workers} = \%workers;
 
     my @lstn_pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
             or die "failed to create socketpair: $!";
     $self->{lstn_pipe} = \@lstn_pipe;
 
-    my ($fh2, $filename2) = tempfile('monoceros_stat_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
-    $self->{sock_stat} = $fh2;
-    $self->{sock_stat_filename} = $filename2;
-    $self->update_sock_stat();
+    my ($fh2, $filename2) = tempfile('monoceros_stats_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
+    $self->{stats_fh} = $fh2;
+    $self->{stats_filename} = $filename2;
+    $self->update_stats();
 
     1;
 }
@@ -142,10 +137,8 @@ sub run_workers {
     if ( $pid ) {
         #parent
         $self->connection_manager($pid);
-        delete $self->{internal_server};
-        unlink $self->{worker_sock};
-        delete $self->{sock_stat};
-        unlink $self->{sock_stat_filename};
+        delete $self->{stats_fh};
+        unlink $self->{stats_filename};
     }
     elsif ( defined $pid ) {
         $self->request_worker($app);
@@ -193,32 +186,38 @@ sub queued_send {
     1;
 }
 
-my $prev_state = '';
-sub update_sock_stat {
+my $prev_stats = '';
+sub update_stats {
     my $self = shift;
-    my $state = scalar keys %{$self->{sockets}} < $self->{max_keepalive_connection};
-    return if $state eq $prev_state && @_;
-    $prev_state = $state;
-    seek($self->{sock_stat},0,0);
-    if ( $state ) {
-        syswrite($self->{sock_stat},0); #can_read
-    }
-    else {
-        syswrite($self->{sock_stat},1); #cannot_read
-    }
-    
+    my $total = scalar keys %{$self->{sockets}};
+    my $processing = scalar grep { !$self->{sockets}{$_}[S_STATE] == 1 } keys %{$self->{sockets}};
+    my $idle = scalar grep { $self->{sockets}{$_}[S_STATE] == 0 } keys %{$self->{sockets}};
+
+    my $stats = "total=$total&";
+    $stats .= "waiting=$idle&";
+    $stats .= "processing=$processing&";
+    $stats .= "max_workers=".$self->{max_workers}."&";
+    return if $stats eq $prev_stats && @_;
+    $prev_stats = $stats;
+    seek($self->{stats_fh},0,0);
+    syswrite($self->{stats_fh}, $stats);
 }
 
 sub can_keepalive {
     my $self = shift;
-    seek($self->{sock_stat},0,0);
-    sysread($self->{sock_stat},my $buf, 1);
-    return ! $buf;
+    seek($self->{stats_fh},0,0);
+    sysread($self->{stats_fh},my $buf, 1024);
+    return 1 unless $buf;
+    if ( $buf =~ m!total=(\d+)&! ){
+        return if $1 >= $self->{max_keepalive_connection};
+    }
+    return 1;
 }
 
 sub connection_manager {
     my ($self, $worker_pid) = @_;
 
+    $self->{workers}{$_}{pipe}[WRITER]->close for 1..$self->{max_workers};
     $self->{lstn_pipe}[READER]->close;
     fh_nonblocking $self->{lstn_pipe}[WRITER], 1;
     fh_nonblocking $self->{listen_sock}, 1;
@@ -267,15 +266,6 @@ sub connection_manager {
             warn "working: $processing | total: $total | idle: $idle";
         }
         for my $key ( keys %{$self->{sockets}} ) { #key = fd
-            #if ( ! $self->{sockets}{$key}[S_IDLE] && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout}
-            #         && (!$self->{sockets}{$key}[S_SOCK] || !getpeername($self->{sockets}{$key}[S_SOCK]) ) ) {
-            #    delete $wait_read{$key};
-            #    delete $self->{sockets}{$key};
-            #}
-            #if ( $self->{sockets}{$key}[S_STATE] == 1 && _getpeername($self->{sockets}{$key}[S_FD], my $addr) < 0 ) {
-            #    delete $wait_read{$key};
-            #    delete $self->{sockets}{$key};
-            #}
             if ( $self->{sockets}{$key}[S_STATE] == 0 && $self->{sockets}{$key}[S_REQS] == 0 
                      && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout} ) { #idle && first req 
                 delete $wait_read{$key};
@@ -288,16 +278,17 @@ sub connection_manager {
                 delete $self->{sockets}{$key};
             }
         }
-        $self->update_sock_stat(1);
+        $self->update_stats(1);
     };
 
     my %m_state;
-    $manager{internal_server} = AE::io $self->{internal_server}, 0, sub {
-        my $sock = $self->{internal_server}->accept;
+    my %workers;
+    for my $wid ( 1..$self->{max_workers} ) {
+        
+        my $sock = $self->{workers}{$wid}{pipe}[READER];
         fh_nonblocking($sock,1);
         return unless $sock;
 
-        my $wid = $sock->fileno;
         $m_state{$wid} = {};
         my $state = $m_state{$wid};
         $state->{buf} = '';
@@ -305,7 +296,7 @@ sub connection_manager {
         $state->{sockid} = '';
         $state->{reqs} = 0;
         
-        my $ws; $ws = AE::io fileno $sock, 0, sub {
+        $workers{$wid} = AE::io fileno $sock, 0, sub {
             if ( $state->{state} eq 'cmd' ) {
                 my $ret = _recv(fileno($sock), my $buf, 28 - length($state->{buf}), 0);
                 if ( !defined $ret && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK) ) {
@@ -313,14 +304,10 @@ sub connection_manager {
                 }
                 if ( !defined $ret ) {
                     warn "failed to recv from sock: $!";
-                    undef $ws;
-                    delete $m_state{$sock->fileno};
                     return;                                        
                 }
                 if ( defined $buf && length $buf == 0) {
-                    undef $ws;
-                    delete $m_state{$sock->fileno};
-                    return;                    
+                    return;                   
                 }
                 $state->{buf} .= $buf;
                 return if length $state->{buf} < 28;
@@ -347,17 +334,7 @@ sub connection_manager {
                 }
                 elsif ( $method eq 'clos' ) {
                     delete $self->{sockets}{$sockid};
-                    $self->update_sock_stat();
-                }
-                elsif ( $method eq 'stat' ) {
-                    my $processing = scalar grep { !$self->{sockets}{$_}[S_STATE] == 1 } keys %{$self->{sockets}};
-                    my $idle = scalar grep { $self->{sockets}{$_}[S_STATE] == 0 } keys %{$self->{sockets}};
-                    my $total = $processing + $idle;
-                    my $msg = "Total: $total\015\012";
-                    $msg .= "Waiting: $idle\015\012";
-                    $msg .= "Processing: $processing\015\012";
-                    $msg .= "MaxWorkers: ".$self->{max_workers}."\015\012\015\012";
-                    $self->write_all_aeio($sock, $msg, $self->{timeout});
+                    $self->update_stats();
                 }
             }
 
@@ -380,63 +357,26 @@ sub connection_manager {
                     $reqs,
                     0
                 ]; #guard,fd,time,reqs,state
-                $self->update_sock_stat();
+                $self->update_stats();
                 $wait_read{$sockid} = AE::io $fd, 0, sub {
                     delete $wait_read{$sockid};
                     $self->queued_send($sockid); 
                 };
             } # cmd
         } # AE::io
-    };
-
+    } # for 1..max_workers
+    $manager{workers} = \%workers;
     $cv->recv;
-}
-
-sub write_aeio {
-    my ($self, $sock, $msg, $len, $off, $timeout) = @_;
- DO_WRITE:
-    my $ret = syswrite($sock, $msg, $len, $off);
-    return $ret if $ret;
-    return if ( ! defined $ret 
-                    && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK) );
-    my $wcv = AE::cv;
-    $wcv->begin; 
-    my $can_write;
-    my $wo; $wo = AE::io $sock, 1, sub {
-        undef $wo;
-        $can_write = 1;
-        $wcv->send();
-    };
-    my $wt; $wt = AE::timer 0, $timeout, sub {
-        undef $wo;
-        undef $wt;
-        $wcv->send();
-    };
-    $wcv->end();
-    undef $wt;
-    return unless $can_write;
-    goto DO_WRITE;
-}
-
-sub write_all_aeio {
-    my ($self, $sock, $msg, $timeout) = @_;
-    my $off = 0;
-    while ( my $len = length($msg) - $off )  {
-        my $ret = $self->write_aeio($sock, $msg, $len, $off, $timeout)
-            or last;
-        $off += $ret;
-    }
-    return length($msg);
 }
 
 sub request_worker {
     my ($self,$app) = @_;
 
-    delete $self->{sock_stat};
-    delete $self->{internal_server};
+    delete $self->{stats_fh};
     $self->{listen_sock}->blocking(0);
     $self->{lstn_pipe}[WRITER]->close;
     $self->{lstn_pipe}[READER]->blocking(0);
+    $self->{workers}{$_}{pipe}[READER]->close for 1..$self->{max_workers};
 
     # use Parallel::Prefork
     my %pm_args = (
@@ -451,24 +391,57 @@ sub request_worker {
         $pm_args{err_respawn_interval} = $self->{err_respawn_interval};
     }
 
+    my $next;
+    $pm_args{on_child_reap} = sub {
+        my ( $pm, $exit_pid, $status ) = @_;
+        for my $wid (1..$self->{max_workers} ) {
+            if ( $self->{workers}{$wid}{running} && $self->{workers}{$wid}{running} == $exit_pid ) {
+                #warn sprintf "finished wid:%s pid:%s", $next, $exit_pid if DEBUG;
+                $self->{workers}{$wid}{running} = 0;
+                last;
+            }
+        }
+    };
+    $pm_args{before_fork} = sub {
+        for my $wid (1..$self->{max_workers} ) {
+            if ( ! $self->{workers}{$wid}{running} ) {
+                $next = $wid;
+                last;
+            }
+        }
+
+    };
+    $pm_args{after_fork} = sub {
+        my ($pm, $pid) = @_;
+        if ( defined $next ) {
+            #warn sprintf "assign wid:%s to pid:%s", $next, $pid if DEBUG;
+            $self->{workers}{$next}{running} = $pid;
+        }
+        else {
+            warn "worker start but next is undefined";
+        }
+    };
+
     my $pm = Parallel::Prefork->new(\%pm_args);
 
     while ($pm->signal_received !~ /^(?:TERM|USR1)$/) {
         $pm->start(sub {
-            open($self->{sock_stat}, '<', $self->{sock_stat_filename})
-                or die "could not open stat file: $!";
+            die 'worker start but next is undefined' unless $next;
+            for my $wid ( 1..$self->{max_workers} ) {
+                next if $wid == $next;
+                $self->{workers}{$wid}{pipe}[WRITER]->close;
+            }
+            $self->{mgr_sock} = $self->{workers}{$next}{pipe}[WRITER];
+            $self->{mgr_sock}->blocking(0);
+
+            open($self->{stats_fh}, '<', $self->{stats_filename})
+                or die "could not open stats file: $!";
 
             $self->{fhlist} = [$self->{listen_sock},$self->{lstn_pipe}[READER]];
             $self->{fhbits} = '';
             for ( @{$self->{fhlist}} ) {
                 vec($self->{fhbits}, fileno $_, 1) = 1;
             }
-
-            $self->{mgr_sock} = IO::Socket::UNIX->new(
-                Type => SOCK_STREAM,
-                Peer => $self->{worker_sock},
-            ) or die "$!";
-            $self->{mgr_sock}->blocking(0);
             
             my $max_reqs_per_child = $self->_calc_minmax_per_child(
                 $self->{max_reqs_per_child},
@@ -555,7 +528,7 @@ sub request_worker {
                     'psgi.nonblocking'  => Plack::Util::FALSE,
                     'psgix.input.buffered' => Plack::Util::TRUE,
                     'psgix.io' => $conn->{fh},
-                    'X_MONOCEROS_WORKER_SOCK' => $self->{worker_sock},
+                    'X_MONOCEROS_WORKER_STATS' => $self->{stats_filename},
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
                 my $prebuf;

@@ -6,7 +6,6 @@ use Plack::Runner;
 use Test::More;
 use Test::TCP;
 
-
 test_tcp(
     server => sub {
         my $port = shift;

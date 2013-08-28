@@ -49,20 +49,27 @@ sub _handle_status {
         return [403, ['Content-Type' => 'text/plain'], [ 'Forbidden' ]];
     }
     
-    if ( !$env->{X_MONOCEROS_WORKER_SOCK} ) {
-        return [500, ['Content-Type' => 'text/plain'], [ 'Monoceros sock file not found' ]];
+    if ( !$env->{X_MONOCEROS_WORKER_STATS} || ! -f $env->{X_MONOCEROS_WORKER_STATS}) {
+        return [500, ['Content-Type' => 'text/plain'], [ 'Monoceros stats file not found' ]];
     }
 
-    my $fh = IO::Socket::UNIX->new(
-        Type => SOCK_STREAM,
-        Peer => $env->{X_MONOCEROS_WORKER_SOCK}
-    ) or return [500, ['Content-Type' => 'text/plain'], [ 'Could not open Monoceros sock: $!' ]];
-    $fh->syswrite('stat'.'0'x24);
+    open(my $fh, $env->{X_MONOCEROS_WORKER_STATS}) or 
+        return [500, ['Content-Type' => 'text/plain'], [ 'Could not open Monoceros stats: $!' ]];
     my $len = $fh->sysread(my $buf, 1024);
     if ( !$len ) {
-        return [500, ['Content-Type' => 'text/plain'], [ 'Could not read status: $!' ]];
+        return [500, ['Content-Type' => 'text/plain'], [ 'Could not read stats: $!' ]];
     }
-    return [200, ['Content-Type' => 'text/plain'], [$buf]];
+    my %stats;
+    for my $str ( split /&/, $buf ) {
+        my ($key,$val) = split /=/, $str, 2;
+        $stats{$key} = $val;
+    }
+    my $msg = "Total: ".$stats{total}."\015\012";
+    $msg .= "Waiting: ".$stats{waiting}."\015\012";
+    $msg .= "Processing: ".$stats{processing}."\015\012";
+    $msg .= "MaxWorkers: ".$stats{max_workers}."\015\012\015\012";
+    
+    return [200, ['Content-Type' => 'text/plain'], [$msg]];
 }
 
 sub allowed {
