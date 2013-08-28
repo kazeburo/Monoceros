@@ -2,6 +2,12 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.20 2013-08-28T02:40:00Z
+
+  - refactor: remove unused variables
+  - use sockpair instead of a internal unix-domain server
+  - change stats file format
+
 0.19 2013-06-11T17:18:23Z
 
   - use file stat instead of symlink
