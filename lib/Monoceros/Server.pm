@@ -7,7 +7,7 @@ use IO::Socket;
 use IO::FDPass;
 use Parallel::Prefork;
 use AnyEvent;
-use AnyEvent::Util qw(fh_nonblocking);
+use AnyEvent::Util qw(fh_nonblocking portable_socketpair);
 use Time::HiRes qw/time/;
 use Plack::TempBuffer;
 use Plack::Util;
@@ -109,22 +109,22 @@ sub setup_sockpair {
 
     my %workers;
     for my $wid ( 1..$self->{max_workers} ) {
-        my @pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
+        my @pair = portable_socketpair()
             or die "failed to create socketpair: $!";
         $workers{$wid} = {
             running => 0,
-            pipe => \@pipe
+            sock => \@pair
         };
     }
     $self->{workers} = \%workers;
 
-    my @lstn_pipe = IO::Socket->socketpair(AF_UNIX, SOCK_STREAM, 0)
+    my @fdpass_sock = portable_socketpair()
             or die "failed to create socketpair: $!";
-    $self->{lstn_pipe} = \@lstn_pipe;
+    $self->{fdpass_sock} = \@fdpass_sock;
 
-    my ($fh2, $filename2) = tempfile('monoceros_stats_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
-    $self->{stats_fh} = $fh2;
-    $self->{stats_filename} = $filename2;
+    my ($fh, $filename) = tempfile('monoceros_stats_XXXXXX',UNLINK => 0, SUFFIX => '.dat', TMPDIR => 1);
+    $self->{stats_fh} = $fh;
+    $self->{stats_filename} = $filename;
     $self->update_stats();
 
     1;
@@ -159,7 +159,7 @@ sub queued_send {
     $self->{sockets}{$sockid}[S_STATE] = 1;
 
     push @{$self->{fdsend_queue}},  $sockid;
-    $self->{fdsend_worker} ||= AE::io $self->{lstn_pipe}[WRITER], 1, sub {
+    $self->{fdsend_worker} ||= AE::io $self->{fdpass_sock}[WRITER], 1, sub {
         while ( my $sockid = shift @{$self->{fdsend_queue}} ) {
             if ( ! exists $self->{sockets}{$sockid}  ) {
                 next;
@@ -169,7 +169,7 @@ sub queued_send {
                 next;
             }
             my $ret = IO::FDPass::send(
-                fileno $self->{lstn_pipe}[WRITER],
+                fileno $self->{fdpass_sock}[WRITER],
                 $self->{sockets}{$sockid}[S_FD]
             );
             if ( !$ret  ) {
@@ -217,9 +217,9 @@ sub can_keepalive {
 sub connection_manager {
     my ($self, $worker_pid) = @_;
 
-    $self->{workers}{$_}{pipe}[WRITER]->close for 1..$self->{max_workers};
-    $self->{lstn_pipe}[READER]->close;
-    fh_nonblocking $self->{lstn_pipe}[WRITER], 1;
+    $self->{workers}{$_}{sock}[WRITER]->close for 1..$self->{max_workers};
+    $self->{fdpass_sock}[READER]->close;
+    fh_nonblocking $self->{fdpass_sock}[WRITER], 1;
     fh_nonblocking $self->{listen_sock}, 1;
 
     my %manager;
@@ -285,7 +285,7 @@ sub connection_manager {
     my %workers;
     for my $wid ( 1..$self->{max_workers} ) {
         
-        my $sock = $self->{workers}{$wid}{pipe}[READER];
+        my $sock = $self->{workers}{$wid}{sock}[READER];
         fh_nonblocking($sock,1);
         return unless $sock;
 
@@ -373,10 +373,10 @@ sub request_worker {
     my ($self,$app) = @_;
 
     delete $self->{stats_fh};
-    $self->{listen_sock}->blocking(0);
-    $self->{lstn_pipe}[WRITER]->close;
-    $self->{lstn_pipe}[READER]->blocking(0);
-    $self->{workers}{$_}{pipe}[READER]->close for 1..$self->{max_workers};
+    fh_nonblocking($self->{listen_sock},1);
+    $self->{fdpass_sock}[WRITER]->close;
+    fh_nonblocking($self->{fdpass_sock}[READER],1);
+    $self->{workers}{$_}{sock}[READER]->close for 1..$self->{max_workers};
 
     # use Parallel::Prefork
     my %pm_args = (
@@ -429,15 +429,15 @@ sub request_worker {
             die 'worker start but next is undefined' unless $next;
             for my $wid ( 1..$self->{max_workers} ) {
                 next if $wid == $next;
-                $self->{workers}{$wid}{pipe}[WRITER]->close;
+                $self->{workers}{$wid}{sock}[WRITER]->close;
             }
-            $self->{mgr_sock} = $self->{workers}{$next}{pipe}[WRITER];
-            $self->{mgr_sock}->blocking(0);
+            $self->{mgr_sock} = $self->{workers}{$next}{sock}[WRITER];
+            fh_nonblocking($self->{mgr_sock},1);
 
             open($self->{stats_fh}, '<', $self->{stats_filename})
                 or die "could not open stats file: $!";
 
-            $self->{fhlist} = [$self->{listen_sock},$self->{lstn_pipe}[READER]];
+            $self->{fhlist} = [$self->{listen_sock},$self->{fdpass_sock}[READER]];
             $self->{fhbits} = '';
             for ( @{$self->{fhlist}} ) {
                 vec($self->{fhbits}, fileno $_, 1) = 1;
@@ -461,9 +461,9 @@ sub request_worker {
                 exit 0 if $self->{term_received} > 1;
             };
             local $SIG{USR1} = sub {
-                $self->{fhlist} = [$self->{lstn_pipe}[READER]];
+                $self->{fhlist} = [$self->{fdpass_sock}[READER]];
                 $self->{fhbits} = '';
-                vec($self->{fhbits}, fileno($self->{lstn_pipe}[READER]), 1) = 1;
+                vec($self->{fhbits}, fileno($self->{fdpass_sock}[READER]), 1) = 1;
                 $self->{stop_accept}++;
             };
 
@@ -629,8 +629,8 @@ sub accept_or_recv {
     my $self = shift;
     my @for_read = @_;
     my $conn;
-    for my $pipe_or_sock ( @for_read ) {
-        if ( fileno $pipe_or_sock == fileno $self->{listen_sock} ) {
+    for my $sock ( @for_read ) {
+        if ( fileno $sock == fileno $self->{listen_sock} ) {
             my $peer = accept(my $fh, $self->{listen_sock});
             if ( !$peer && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK && $! != ESPIPE) ) {
                 warn sprintf 'failed to accept: %s (%d)', $!, $!;
@@ -652,8 +652,8 @@ sub accept_or_recv {
             };
             last;
         }
-        elsif ( fileno $pipe_or_sock == fileno $self->{lstn_pipe}[READER] ) {
-            my $fd = IO::FDPass::recv(fileno $self->{lstn_pipe}[READER]);
+        elsif ( fileno $sock == fileno $self->{fdpass_sock}[READER] ) {
+            my $fd = IO::FDPass::recv(fileno $self->{fdpass_sock}[READER]);
             if ( $fd < 0 && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK && $! != ESPIPE) ) {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
