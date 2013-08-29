@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.22 2013-08-29T02:50:57Z
+
+  - improved around readahead
+
 0.21 2013-08-28T05:21:59Z
 
   - use AnyEvent::Util::portable_socketpair
