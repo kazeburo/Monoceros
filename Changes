@@ -2,6 +2,8 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+  - no trial
+
 0.22 2013-08-29T02:50:57Z
 
   - improved around readahead

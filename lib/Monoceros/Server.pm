@@ -510,7 +510,8 @@ sub request_worker {
                     }
                     # try to re-read next_conn
                     if ( !$conn && $next_conn ) {
-                        $conn = $next_conn;
+                        @rfh = ();
+                        next;
                     }
                     #clear next_conn
                     @rfh = ();
