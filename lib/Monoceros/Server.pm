@@ -500,14 +500,21 @@ sub request_worker {
                             }
                         }
                     }
-                    #read ahead. but still cannot read
-                    $self->keep_it($next_conn) if $next_conn && !$conn;
+                    #accept or recv
+                    if ( !$conn )  {
+                        $conn = $self->accept_or_recv( @can_read );
+                    }
+                    # exists new conn && exists next_conn && next_conn is not ready => keep
+                    if ( $conn && $next_conn && $conn != $next_conn ) {
+                        $self->keep_it($next_conn);
+                    }
+                    # try to re-read next_conn
+                    if ( !$conn && $next_conn ) {
+                        $conn = $next_conn;
+                    }
                     #clear next_conn
                     @rfh = ();
                     $next_conn = undef;
-                    #accept or recv
-                    $conn = $self->accept_or_recv( @can_read )
-                        unless $conn;
                 }
                 next unless $conn;
                 
@@ -574,18 +581,6 @@ sub request_worker {
 
                 # read ahead
                 if ( $conn->{reqs} < $max_readahead_reqs &&  $proc_req_count < $max_reqs_per_child ) {
-                    my $ret = sysread($conn->{fh}, my $buf, MAX_REQUEST_SIZE);
-                    if ( defined $ret && $ret > 0 ) {
-                        $next_conn = $conn;
-                        $next_conn->{buf} = $buf;
-                        next;
-                    }
-                    elsif ( defined $ret ) {
-                        #closed?
-                        $self->cmd_to_mgr('clos', $conn->{peername}, $conn->{reqs})
-                             if !$conn->{direct};
-                        next;
-                    }
                     $next_conn = $conn;
                     next;
                 }
