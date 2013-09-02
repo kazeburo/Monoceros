@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.24 2013-09-02T06:39:06Z
+
+  - supports harakiri
+
 0.23 2013-08-29T04:45:27Z
 
   - no trial version
