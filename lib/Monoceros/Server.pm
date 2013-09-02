@@ -526,16 +526,17 @@ sub request_worker {
                     SCRIPT_NAME => '',
                     REMOTE_ADDR => $conn->{peeraddr},
                     REMOTE_PORT => $conn->{peerport},
-                    'psgi.version' => [ 1, 1 ],
-                    'psgi.errors'  => *STDERR,
-                    'psgi.url_scheme' => 'http',
+                    'psgi.version'      => [ 1, 1 ],
+                    'psgi.errors'       => *STDERR,
+                    'psgi.url_scheme'   => 'http',
                     'psgi.run_once'     => Plack::Util::FALSE,
                     'psgi.multithread'  => Plack::Util::FALSE,
                     'psgi.multiprocess' => Plack::Util::TRUE,
                     'psgi.streaming'    => Plack::Util::TRUE,
                     'psgi.nonblocking'  => Plack::Util::FALSE,
                     'psgix.input.buffered' => Plack::Util::TRUE,
-                    'psgix.io' => $conn->{fh},
+                    'psgix.io'          => $conn->{fh},
+                    'psgix.harakiri'    => 1,
                     'X_MONOCEROS_WORKER_STATS' => $self->{stats_filename},
                 };
                 $self->{_is_deferred_accept} = 1; #ready to read
@@ -565,6 +566,11 @@ sub request_worker {
                 my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
                                                          $may_keepalive, $is_keepalive, $prebuf, 
                                                          $conn->{reqs});
+                # harakiri
+                if ($env->{'psgix.harakiri.commit'}) {
+                    $proc_req_count = $max_reqs_per_child + 1;
+                }
+
                 $conn->{reqs}++;
                 if ( !$keepalive ) {
                     #close
