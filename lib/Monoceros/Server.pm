@@ -631,6 +631,9 @@ sub accept_or_recv {
     my $self = shift;
     my @for_read = @_;
     my $conn;
+
+    use open IO => ':unix';
+
     for my $sock ( @for_read ) {
         if ( fileno $sock == fileno $self->{listen_sock} ) {
             my $peer = accept(my $fh, $self->{listen_sock});
