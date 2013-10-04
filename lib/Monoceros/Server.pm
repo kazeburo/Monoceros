@@ -33,6 +33,21 @@ use constant CHUNKSIZE    => 64 * 1024;
 use constant DEBUG        => $ENV{MONOCEROS_DEBUG} || 0;
 
 my $null_io = do { open my $io, "<", \""; $io };
+my $have_accept4 = eval {
+    require Linux::Socket::Accept4;
+    1;
+};
+my $do_accept = $have_accept4 
+  ? sub {
+      my $peer = Linux::Socket::Accept4::accept4(my $fh,shift,
+          Linux::Socket::Accept4::SOCK_CLOEXEC()|Linux::Socket::Accept4::SOCK_NONBLOCK());
+      return ($fh,$peer);
+  }
+  : sub {
+      my $peer = accept(my $fh,shift);
+      fh_nonblocking($fh,1) if $peer;
+      return ($fh,$peer);
+ };
 
 sub new {
     my $class = shift;
@@ -632,17 +647,14 @@ sub accept_or_recv {
     my @for_read = @_;
     my $conn;
 
-    use open IO => ':unix';
-
     for my $sock ( @for_read ) {
         if ( fileno $sock == fileno $self->{listen_sock} ) {
-            my $peer = accept(my $fh, $self->{listen_sock});
+            my ($fh,$peer) = $do_accept->($self->{listen_sock});
             if ( !$peer && ($! != EINTR && $! != EAGAIN && $! != EWOULDBLOCK && $! != ESPIPE) ) {
                 warn sprintf 'failed to accept: %s (%d)', $!, $!;
                 next;
             }
             next unless $peer;
-            fh_nonblocking($fh,1);
             setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
                 or die "setsockopt(TCP_NODELAY) failed:$!";
             my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
