@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.25 2013-10-05T14:29:57Z
+
+  - supports accept4(2) using Linux::Socket::Accept4
+
 0.24 2013-09-02T06:39:06Z
 
   - supports harakiri
