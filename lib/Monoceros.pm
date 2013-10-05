@@ -49,6 +49,8 @@ And this server inherit L<Starlet>. Monoceros supports following features too.
 
 - fast HTTP processing using L<HTTP::Parser::XS> (optional)
 
+- accept4(2) using L<Linux::Socket::Accept4> (optional)
+
 Currently, Monoceros does not support spawn-interval and max-keepalive-reqs.
 
 =head1 COMMAND LINE OPTIONS

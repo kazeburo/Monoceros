@@ -36,6 +36,8 @@ And this server inherit [Starlet](http://search.cpan.org/perldoc?Starlet). Monoc
 
 \- fast HTTP processing using [HTTP::Parser::XS](http://search.cpan.org/perldoc?HTTP::Parser::XS) (optional)
 
+\- accept4(2) using [Linux::Socket::Accept4](http://search.cpan.org/perldoc?Linux::Socket::Accept4) (optional)
+
 Currently, Monoceros does not support spawn-interval and max-keepalive-reqs.
 
 # COMMAND LINE OPTIONS
