@@ -1,4 +1,6 @@
 language: perl
+before_install:
+  - cpanm -n Linux::Socket::Accept4
 perl:
   - 5.18
   - 5.16
