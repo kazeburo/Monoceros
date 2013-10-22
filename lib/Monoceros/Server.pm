@@ -65,12 +65,12 @@ sub new {
     }
 
     my $open_max = eval { POSIX::sysconf (POSIX::_SC_OPEN_MAX ()) - 1 } || 1023;
-
     my $self = bless {
         host                 => $args{host} || 0,
         port                 => $args{port} || 8080,
         max_workers          => $max_workers,
         timeout              => $args{timeout} || 300,
+        disable_keepalive    => (exists $args{keepalive} && !$args{keepalive}) ? 1 : 0,
         keepalive_timeout    => $args{keepalive_timeout} || 10,
         max_keepalive_connection => $args{max_keepalive_connection} || int($open_max/2),
         max_readahead_reqs   => (
@@ -565,6 +565,7 @@ sub request_worker {
                 # stop keepalive if SIG{TERM} or SIG{USR1}. but go-on if pipline req
                 my $may_keepalive = 1;
                 $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept});
+                $may_keepalive = 0 if $self->{disable_keepalive};
                 my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
                                       #  treat every connection as keepalive
                 my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 

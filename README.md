@@ -77,7 +77,9 @@ max. number of requests to continue to read a request in a worker process. Monoc
 
 if set, randomizes the number of requests to continue to read a request between the value and that supplied by `--max-readahead-reqs` (default: none)
 
+## \--disable-keepalive
 
+disable HTTP keepalive feature (default: enabled)
 
 # RECOMMENDED MODULES
 

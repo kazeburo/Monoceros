@@ -90,6 +90,9 @@ max. number of requests to continue to read a request in a worker process. Monoc
 
 if set, randomizes the number of requests to continue to read a request between the value and that supplied by C<--max-readahead-reqs> (default: none)
 
+=head2 --disable-keepalive
+
+disable HTTP keepalive feature (default: enabled)
 
 =head1 RECOMMENDED MODULES
 
