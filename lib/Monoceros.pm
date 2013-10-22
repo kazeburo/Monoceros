@@ -72,7 +72,7 @@ timeout for persistent connections (default: 10)
 
 =head2 --max-reqs-per-child=#
 
-max. number of requests to be handled before a worker process exits (default: 100)
+max. number of requests to be handled before a worker process exits (default: 1000)
 
 =head2 --min-reqs-per-child=#
 

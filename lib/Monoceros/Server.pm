@@ -88,7 +88,7 @@ sub new {
                 ? $args{min_reqs_per_child} : undef,
         ),
         max_reqs_per_child   => (
-            $args{max_reqs_per_child} || $args{max_requests} || 100,
+            $args{max_reqs_per_child} || $args{max_requests} || 1000,
         ),
         err_respawn_interval => (
             defined $args{err_respawn_interval}
