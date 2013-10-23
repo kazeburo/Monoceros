@@ -2,6 +2,12 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.26 2013-10-23T01:33:36Z
+
+  - add --disable-keepalive opt
+  - change the default of --max-reqs-per-child, 100 to 1000
+  - support sendfile(2) (EXPERIMENTAL)
+
 0.25 2013-10-05T14:29:57Z
 
   - supports accept4(2) using Linux::Socket::Accept4
