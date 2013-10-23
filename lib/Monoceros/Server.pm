@@ -920,7 +920,7 @@ sub _handle_response {
         # sendfile
         my $use_cork = 0;
         if ( $^O eq 'linux' ) {
-            setsockopt($self->{listen_sock}, IPPROTO_TCP, 3, 1)
+            setsockopt($conn, IPPROTO_TCP, 3, 1)
                 and $use_cork = 1;
         }
         $self->write_all($conn, join('', @lines), $self->{timeout})
@@ -928,7 +928,7 @@ sub _handle_response {
         my $len = $self->sendfile_all($conn, $body, $cl, $self->{timeout});
         #warn sprintf('%d:%s',$!, $!) unless $len;
         if ( $use_cork ) {
-            setsockopt($self->{listen_sock}, IPPROTO_TCP, 3, 0)
+            setsockopt($conn, IPPROTO_TCP, 3, 0)
         }
         return;
     }
