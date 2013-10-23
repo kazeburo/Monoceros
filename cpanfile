@@ -17,6 +17,7 @@ requires 'POSIX::Socket';
 suggests 'EV' => '4.15';
 suggests 'HTTP::Parser::XS' => '0.16';
 suggests 'Guard' => '1.022';
+suggests 'Sys::Sendfile' => '0.11';
 
 
 

@@ -56,7 +56,8 @@
          "suggests" : {
             "EV" : "4.15",
             "Guard" : "1.022",
-            "HTTP::Parser::XS" : "0.16"
+            "HTTP::Parser::XS" : "0.16",
+            "Sys::Sendfile" : "0.11"
          }
       },
       "test" : {
