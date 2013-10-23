@@ -915,8 +915,10 @@ sub _handle_response {
         return;
     }
 
-    if ( $have_sendfile && !$use_chunked && defined $body && fileno($body) ) {
-        my $cl = -s $body;
+    if ( $have_sendfile && !$use_chunked
+      && defined $body && ref $body ne 'ARRAY'
+      && fileno($body) ) {
+        my $cl = $send_headers{'content-length'} || -s $body;
         # sendfile
         my $use_cork = 0;
         if ( $^O eq 'linux' ) {
