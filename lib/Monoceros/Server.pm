@@ -998,10 +998,10 @@ sub do_io {
     }
  DO_READWRITE:
     # try to do the IO
-    if ($is_write == 1) {
+    if ($is_write && $is_write == 1) {
         $ret = syswrite $sock, $buf, $len, $off
             and return $ret;
-    } elsif ($is_write == 2) {
+    } elsif ($is_write && $is_write == 2) {
         $ret = Sys::Sendfile::sendfile($sock, $buf, $len)
             and return $ret;
         $ret = undef if defined $ret && $ret == 0 && $! == EAGAIN; #hmm
