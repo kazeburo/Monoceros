@@ -915,7 +915,7 @@ sub _handle_response {
         return;
     }
 
-    if ( $have_sendfile && !$use_chunked && defined $body && ref $body ne 'ARRAY' ) {
+    if ( $have_sendfile && !$use_chunked && defined $body && fileno($body) ) {
         my $cl = -s $body;
         # sendfile
         my $use_cork = 0;
@@ -927,7 +927,7 @@ sub _handle_response {
             or return;
         my $len = $self->sendfile_all($conn, $body, $cl, $self->{timeout});
         #warn sprintf('%d:%s',$!, $!) unless $len;
-        if ( $use_cork ) {
+        if ( $use_cork && $$use_keepalive_r ) {
             setsockopt($conn, IPPROTO_TCP, 3, 0)
         }
         return;
