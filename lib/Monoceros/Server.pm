@@ -928,7 +928,7 @@ sub _handle_response {
         my $len = $self->sendfile_all($conn, $body, $cl, $self->{timeout});
         #warn sprintf('%d:%s',$!, $!) unless $len;
         if ( $use_cork && $$use_keepalive_r ) {
-            setsockopt($conn, IPPROTO_TCP, 3, 0)
+            setsockopt($conn, IPPROTO_TCP, 3, 0);
         }
         return;
     }
