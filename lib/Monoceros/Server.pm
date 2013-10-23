@@ -640,7 +640,7 @@ sub accept_or_recv {
     my $self = shift;
     my @for_read = @_;
     my $conn;
-    #use open 'IO' => ':unix';
+    use open 'IO' => ':unix';
     for my $sock ( @for_read ) {
         if ( fileno $sock == fileno $self->{listen_sock} ) {
             my ($fh,$peer);
@@ -680,7 +680,7 @@ sub accept_or_recv {
             if ( _getpeername($fd, $peer) < 0 ) {
                 next;
             }
-            open(my $fh, '<&='.$fd)
+            open(my $fh, '>>&='.$fd)
                 or die "could not open fd: $!";
             my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
             my $peeraddr = inet_ntoa($peerhost);
@@ -926,7 +926,7 @@ sub _handle_response {
         $self->write_all($conn, join('', @lines), $self->{timeout})
             or return;
         my $len = $self->sendfile_all($conn, $body, $cl, $self->{timeout});
-        warn sprintf('%d:%s',$!, $!) unless $len;
+        #warn sprintf('%d:%s',$!, $!) unless $len;
         if ( $use_cork ) {
             setsockopt($self->{listen_sock}, IPPROTO_TCP, 3, 0)
         }
@@ -1004,14 +1004,13 @@ sub do_io {
     } elsif ($is_write == 2) {
         $ret = Sys::Sendfile::sendfile($sock, $buf, $len)
             and return $ret;
-        $ret = undef if defined $ret && $ret == 0;
+        $ret = undef if defined $ret && $ret == 0 && $! == EAGAIN; #hmm
     } else {
         $ret = sysread $sock, $$buf, $len, $off
             and return $ret;
     }
     unless ((! defined($ret)
                  && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK))) {
-warn "$$ error";
         return;
     }
     # wait for data
