@@ -89,6 +89,17 @@ For more performance. I recommends you to install these module.
 
 \- [HTTP::Parser::XS](http://search.cpan.org/perldoc?HTTP::Parser::XS)
 
+# EXPERIMENTAL FEATURES
+
+- accept4
+
+    Linux only. If Linux::Socket::Accept4 is available, Monoceros use it.
+    accept4(2) can do accept(2) and set SOCK\_CLOEXEC|SOCK\_NONBLOCK at once. 
+
+- sendfile
+
+    Monoceros send IO::Handle like body with sendfile(2). [Sys::Sendfile](http://search.cpan.org/perldoc?Sys::Sendfile) is required.
+
 # SEE ALSO
 
 [Starlet](http://search.cpan.org/perldoc?Starlet), [Server::Starter](http://search.cpan.org/perldoc?Server::Starter), [AnyEvent](http://search.cpan.org/perldoc?AnyEvent), [IO::FDPass](http://search.cpan.org/perldoc?IO::FDPass)

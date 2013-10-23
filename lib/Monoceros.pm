@@ -102,6 +102,21 @@ For more performance. I recommends you to install these module.
 
 - L<HTTP::Parser::XS>
 
+=head1 EXPERIMENTAL FEATURES
+
+=over 4
+
+=item accept4
+
+Linux only. If Linux::Socket::Accept4 is available, Monoceros use it.
+accept4(2) can do accept(2) and set SOCK_CLOEXEC|SOCK_NONBLOCK at once. 
+
+=item sendfile
+
+Monoceros send IO::Handle like body with sendfile(2). L<Sys::Sendfile> is required.
+
+=back
+
 =head1 SEE ALSO
 
 L<Starlet>, L<Server::Starter>, L<AnyEvent>, L<IO::FDPass>
