@@ -38,6 +38,10 @@ my $have_accept4 = eval {
     Linux::Socket::Accept4::SOCK_CLOEXEC()|Linux::Socket::Accept4::SOCK_NONBLOCK();
 };
 
+my $have_sendfile = eval {
+    require Sys::Sendfile;
+};
+
 sub new {
     my $class = shift;
     my %args = @_;
@@ -636,7 +640,7 @@ sub accept_or_recv {
     my $self = shift;
     my @for_read = @_;
     my $conn;
-    use open 'IO' => ':unix';
+    #use open 'IO' => ':unix';
     for my $sock ( @for_read ) {
         if ( fileno $sock == fileno $self->{listen_sock} ) {
             my ($fh,$peer);
@@ -883,7 +887,7 @@ sub _handle_response {
     }
     elsif ( $protocol eq 'HTTP/1.1' ) {
         if (defined $send_headers{'content-length'}
-                || defined $send_headers{'transfer-encoding'}) {
+            || defined $send_headers{'transfer-encoding'}) {
             # ok
         } elsif ( !Plack::Util::status_with_no_entity_body($status_code) ) {
             push @lines, "Transfer-Encoding: chunked\015\012";
@@ -910,6 +914,25 @@ sub _handle_response {
         warn $! unless $len;
         return;
     }
+
+    if ( $have_sendfile && !$use_chunked && defined $body && ref $body ne 'ARRAY' ) {
+        my $cl = -s $body;
+        # sendfile
+        my $use_cork = 0;
+        if ( $^O eq 'linux' ) {
+            setsockopt($self->{listen_sock}, IPPROTO_TCP, 3, 1)
+                and $use_cork = 1;
+        }
+        $self->write_all($conn, join('', @lines), $self->{timeout})
+            or return;
+        my $len = $self->sendfile_all($conn, $body, $cl, $self->{timeout});
+        warn sprintf('%d:%s',$!, $!) unless $len;
+        if ( $use_cork ) {
+            setsockopt($self->{listen_sock}, IPPROTO_TCP, 3, 0)
+        }
+        return;
+    }
+
     $self->write_all($conn, join('', @lines), $self->{timeout})
         or return;
 
@@ -965,5 +988,68 @@ sub _calc_minmax_per_child {
         return $max;
     }
 }
+
+# returns value returned by $cb, or undef on timeout or network error
+sub do_io {
+    my ($self, $is_write, $sock, $buf, $len, $off, $timeout) = @_;
+    my $ret;
+    unless ($is_write || delete $self->{_is_deferred_accept}) {
+        goto DO_SELECT;
+    }
+ DO_READWRITE:
+    # try to do the IO
+    if ($is_write == 1) {
+        $ret = syswrite $sock, $buf, $len, $off
+            and return $ret;
+    } elsif ($is_write == 2) {
+        $ret = Sys::Sendfile::sendfile($sock, $buf, $len)
+            and return $ret;
+        $ret = undef if defined $ret && $ret == 0;
+    } else {
+        $ret = sysread $sock, $$buf, $len, $off
+            and return $ret;
+    }
+    unless ((! defined($ret)
+                 && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK))) {
+warn "$$ error";
+        return;
+    }
+    # wait for data
+ DO_SELECT:
+    while (1) {
+        my ($rfd, $wfd);
+        my $efd = '';
+        vec($efd, fileno($sock), 1) = 1;
+        if ($is_write) {
+            ($rfd, $wfd) = ('', $efd);
+        } else {
+            ($rfd, $wfd) = ($efd, '');
+        }
+        my $start_at = time;
+        my $nfound = select($rfd, $wfd, $efd, $timeout);
+        $timeout -= (time - $start_at);
+        last if $nfound;
+        return if $timeout <= 0;
+    }
+    goto DO_READWRITE;
+}
+
+sub sendfile_timeout {
+    my ($self, $sock, $fh, $len, $off, $timeout) = @_;
+    $self->do_io(2, $sock, $fh, $len, $off, $timeout);
+}
+
+sub sendfile_all {
+    my ($self, $sock, $fh, $cl, $timeout) = @_;
+    my $off = 0;
+    while (my $len = $cl - $off) {
+        my $ret = $self->sendfile_timeout($sock, $fh, $len, $off, $timeout)
+            or return;
+        $off += $ret;
+        seek($fh, $off, 0) if $cl != $off;
+    }
+    return $cl;
+}
+
 
 1;
