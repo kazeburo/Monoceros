@@ -18,6 +18,7 @@ use POSIX::Socket;
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 use Digest::MD5 qw/md5/;
+use Carp;
 
 use constant WRITER => 0;
 use constant READER => 1;
@@ -45,7 +46,7 @@ my $have_sendfile = eval {
 sub new {
     my $class = shift;
     my %args = @_;
-
+    # warn "MASTER PID: $$";
     # setup before instantiation
     my $listen_sock;
     if (defined $ENV{SERVER_STARTER_PORT}) {
@@ -67,8 +68,23 @@ sub new {
         $max_workers = delete $args{$_}
             if defined $args{$_};
     }
+    # will daemonize
+    if ($args{daemonize}) {
+        my $pid = fork();
+        chdir '/';
+        exit if $pid;
+    }
+    # rename process
 
+    $0 = 'Monoceros Master';
+    
     my $open_max = eval { POSIX::sysconf (POSIX::_SC_OPEN_MAX ()) - 1 } || 1023;
+    
+    # will write pid_file
+    if ($args{pid}) {
+        write_pid($args{pid});
+    }
+
     my $self = bless {
         host                 => $args{host} || 0,
         port                 => $args{port} || 8080,
@@ -149,6 +165,7 @@ sub run_workers {
         unlink $self->{stats_filename};
     }
     elsif ( defined $pid ) {
+        $0 = 'Monoceros worker';
         $self->request_worker($app);
         exit;
     }
@@ -1052,5 +1069,23 @@ sub sendfile_all {
     return $cl;
 }
 
+
+#STATIC
+sub write_pid {
+    my $file = shift;
+    if (-e $file) {
+        open PID, $file;
+        my $pid = <PID>;
+        close PID;
+        if (kill 0, $pid) {
+            croak "Can't rewrite pid of alive process\n";
+        }
+    }
+
+    open PID, '>', $file or croak "Can't open pid file: $file\n";
+    print PID $$;
+    close PID;
+    return 1;
+}
 
 1;
