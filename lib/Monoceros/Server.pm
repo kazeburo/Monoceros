@@ -46,7 +46,6 @@ my $have_sendfile = eval {
 sub new {
     my $class = shift;
     my %args = @_;
-    # warn "MASTER PID: $$";
     # setup before instantiation
     my $listen_sock;
     if (defined $ENV{SERVER_STARTER_PORT}) {
