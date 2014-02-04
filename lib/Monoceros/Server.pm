@@ -12,7 +12,7 @@ use Time::HiRes qw/time/;
 use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
-use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS :sys_wait_h);
+use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS setuid setgid :sys_wait_h);
 use POSIX::getpeername qw/_getpeername/;
 use POSIX::Socket;
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
@@ -66,6 +66,19 @@ sub new {
     for (qw(max_workers workers)) {
         $max_workers = delete $args{$_}
             if defined $args{$_};
+    }
+
+    if ($args{user}) {
+        if ($args{user} !~ m/^\d*$/s) {
+            $args{user} = getpwnam($args{user});
+        }
+        setuid($args{user});
+    }
+    if ($args{group}) {
+        if ($args{group} !~ m/^\d*$/s) {
+            $args{group} = getgrnam($args{user});
+        }
+        setgid($args{group});
     }
     # will daemonize
     if ($args{daemonize}) {
