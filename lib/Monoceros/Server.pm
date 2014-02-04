@@ -177,7 +177,7 @@ sub run_workers {
         unlink $self->{stats_filename};
     }
     elsif ( defined $pid ) {
-        $0 = 'Monoceros worker';
+        $0 = 'Monoceros Worker';
         $self->request_worker($app);
         exit;
     }
