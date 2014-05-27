@@ -14,7 +14,6 @@ use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
 use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS :sys_wait_h);
 use POSIX::getpeername qw/_getpeername/;
-use POSIX::Socket;
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 use Digest::MD5 qw/md5/;
@@ -39,6 +38,7 @@ my $have_accept4 = eval {
 };
 
 my $have_sendfile = eval {
+     return 0;
     require Sys::Sendfile;
 };
 
@@ -72,6 +72,7 @@ sub new {
     my $self = bless {
         host                 => $args{host} || 0,
         port                 => $args{port} || 8080,
+        socket_path          => (defined $args{socket_path}) ? $args{socket_path} : undef,
         max_workers          => $max_workers,
         timeout              => $args{timeout} || 300,
         disable_keepalive    => (exists $args{keepalive} && !$args{keepalive}) ? 1 : 0,
@@ -103,6 +104,41 @@ sub new {
     }, $class;
 
     $self;
+}
+
+sub setup_listener {
+    my $self = shift;
+    if ( my $path = $self->{socket_path} ) {
+        if (-S $path) {
+            warn "removing existing socket file:$path";
+            unlink $path
+                or die "failed to remove existing socket file:$path:$!";
+        }
+        unlink $path;
+        my $saved_umask = umask(0);
+        $self->{listen_sock} = IO::Socket::UNIX->new(
+            Listen => Socket::SOMAXCONN(),
+            Local  => $path,
+        ) or die "failed to listen to socket $path:$!";
+        umask($saved_umask);
+        $self->{use_unix_domain} = 1;
+    }
+    else {
+        $self->{listen_sock} ||= IO::Socket::INET->new(
+            Listen    => SOMAXCONN,
+            LocalPort => $self->{port},
+            LocalAddr => $self->{host},
+            Proto     => 'tcp',
+            ReuseAddr => 1,
+        ) or die "failed to listen to port $self->{port}:$!";
+        # set defer accept
+        if ($^O eq 'linux' && !$self->{use_unix_domain}) {
+            setsockopt($self->{listen_sock}, IPPROTO_TCP, 9, 1)
+                and $self->{_using_defer_accept} = 1;
+        }
+    }
+
+    $self->{server_ready}->($self);
 }
 
 sub run {
@@ -306,7 +342,7 @@ sub connection_manager {
         
         $workers{$wid} = AE::io fileno $sock, 0, sub {
             if ( $state->{state} eq 'cmd' ) {
-                my $ret = _recv(fileno($sock), my $buf, 28 - length($state->{buf}), 0);
+                my $ret = recv($sock, my $buf, 28 - length($state->{buf}), 0);
                 if ( !defined $ret && ($! == EINTR || $! == EAGAIN || $! == EWOULDBLOCK) ) {
                     return;
                 }
@@ -359,7 +395,7 @@ sub connection_manager {
                 my $sockid = $state->{sockid};
                 my $reqs = $state->{reqs};
                 $self->{sockets}{$sockid} = [
-                    AnyEvent::Util::guard { _close($fd) },
+                    AnyEvent::Util::guard { POSIX::close($fd) },
                     $fd,
                     AE::now,
                     $reqs,
@@ -529,11 +565,11 @@ sub request_worker {
                 
                 ++$proc_req_count;
                 my $env = {
-                    SERVER_PORT => $self->{port},
-                    SERVER_NAME => $self->{host},
+                    SERVER_PORT => $self->{port} || 0,
+                    SERVER_NAME => $self->{host} || 0,
                     SCRIPT_NAME => '',
                     REMOTE_ADDR => $conn->{peeraddr},
-                    REMOTE_PORT => $conn->{peerport},
+                    REMOTE_PORT => $conn->{peerport} || 0,
                     'psgi.version'      => [ 1, 1 ],
                     'psgi.errors'       => *STDERR,
                     'psgi.url_scheme'   => 'http',
@@ -617,7 +653,7 @@ sub request_worker {
 sub cmd_to_mgr {
     my ($self,$cmd,$peername,$reqs) = @_;
     my $msg = $cmd . Digest::MD5::md5($peername) . sprintf('%08x',$reqs);
-    _sendn(fileno($self->{mgr_sock}), $msg, 0);
+    send($self->{mgr_sock}, $msg, 0);
 }
 
 sub keep_it {
@@ -656,10 +692,17 @@ sub accept_or_recv {
                 next;
             }
             next unless $peer;
-            setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
-                or die "setsockopt(TCP_NODELAY) failed:$!";
-            my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
-            my $peeraddr = inet_ntoa($peerhost);
+            if ( !$self->{use_unix_domain} ) {
+                setsockopt($fh, IPPROTO_TCP, TCP_NODELAY, 1)
+                    or die "setsockopt(TCP_NODELAY) failed:$!";
+            }
+            my ($peerport,$peerhost,$peeraddr);
+            if ( $self->{use_unix_domain} ) {
+            }
+            else {
+                ($peerport,$peerhost) = unpack_sockaddr_in $peer;
+                $peeraddr = inet_ntoa($peerhost);
+            }
             $conn = {
                 fh => $fh,
                 peername => $peer,
@@ -682,8 +725,13 @@ sub accept_or_recv {
             }
             open(my $fh, '>>&='.$fd)
                 or die "could not open fd: $!";
-            my ($peerport,$peerhost) = unpack_sockaddr_in $peer;
-            my $peeraddr = inet_ntoa($peerhost);
+            my ($peerport,$peerhost,$peeraddr);
+            if ( $self->{use_unix_domain} ) {
+            }
+            else {
+                ($peerport,$peerhost) = unpack_sockaddr_in $peer;
+                $peeraddr = inet_ntoa($peerhost);
+            }
             $conn = {
                 fh => $fh,
                 peername => $peer,
@@ -921,7 +969,7 @@ sub _handle_response {
         my $cl = $send_headers{'content-length'} || -s $body;
         # sendfile
         my $use_cork = 0;
-        if ( $^O eq 'linux' ) {
+        if ( $^O eq 'linux' && !$self->{use_unix_domain} ) {
             setsockopt($conn, IPPROTO_TCP, 3, 1)
                 and $use_cork = 1;
         }
@@ -929,7 +977,7 @@ sub _handle_response {
             or return;
         my $len = $self->sendfile_all($conn, $body, $cl, $self->{timeout});
         #warn sprintf('%d:%s',$!, $!) unless $len;
-        if ( $use_cork && $$use_keepalive_r ) {
+        if ( $use_cork && $$use_keepalive_r && !$self->{use_unix_domain} ) {
             setsockopt($conn, IPPROTO_TCP, 3, 0);
         }
         return;

@@ -12,7 +12,6 @@ requires 'AnyEvent' => '7.04';
 requires 'Plack' => '1.0023';
 requires 'Net::CIDR::Lite';
 requires 'POSIX::getpeername';
-requires 'POSIX::Socket';
 
 suggests 'EV' => '4.15';
 suggests 'HTTP::Parser::XS' => '0.16';
