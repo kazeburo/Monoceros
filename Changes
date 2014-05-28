@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.27 2014-05-28T03:25:37Z
+
+  - stop using POSIX::Socket
+
 0.26 2013-10-23T01:33:36Z
 
   - add --disable-keepalive opt
