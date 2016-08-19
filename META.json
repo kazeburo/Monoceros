@@ -49,7 +49,7 @@
             "Net::CIDR::Lite" : "0",
             "POSIX::getpeername" : "0",
             "Parallel::Prefork" : "0.14",
-            "Plack" : "1.0023",
+            "Plack" : "1.0035",
             "Starlet" : "0.18",
             "perl" : "5.008005"
          },

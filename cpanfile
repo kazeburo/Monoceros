@@ -9,7 +9,7 @@ requires 'Starlet' => '0.18';
 requires 'Parallel::Prefork' => '0.14';
 requires 'IO::FDPass' => '1.0';
 requires 'AnyEvent' => '7.04';
-requires 'Plack' => '1.0023';
+requires 'Plack' => '1.0035';
 requires 'Net::CIDR::Lite';
 requires 'POSIX::getpeername';
 
