@@ -310,11 +310,11 @@ sub connection_manager {
             warn "working: $processing | total: $total | idle: $idle";
         }
         for my $key ( keys %{$self->{sockets}} ) { #key = fd
-            if ( $self->{sockets}{$key}[S_STATE] == 0 && $self->{sockets}{$key}[S_REQS] == 0 
-                     && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout} ) { #idle && first req 
+            if ( $self->{sockets}{$key}[S_STATE] == 0 && $self->{sockets}{$key}[S_REQS] == 0
+                     && $time - $self->{sockets}{$key}[S_TIME] > $self->{timeout} ) { #idle && first req
                 delete $wait_read{$key};
                 delete $self->{sockets}{$key};
-                
+
             }
             elsif ( $self->{sockets}{$key}[S_STATE] == 0 && $self->{sockets}{$key}[S_REQS] > 0 &&
                      $time - $self->{sockets}{$key}[S_TIME] > $self->{keepalive_timeout} ) { #idle && keepalivew
@@ -322,13 +322,14 @@ sub connection_manager {
                 delete $self->{sockets}{$key};
             }
         }
+
         $self->update_stats(1);
     };
 
     my %m_state;
     my %workers;
     for my $wid ( 1..$self->{max_workers} ) {
-        
+
         my $sock = $self->{workers}{$wid}{sock}[READER];
         fh_nonblocking($sock,1);
         return unless $sock;
@@ -339,7 +340,7 @@ sub connection_manager {
         $state->{state} = 'cmd';
         $state->{sockid} = '';
         $state->{reqs} = 0;
-        
+
         $workers{$wid} = AE::io fileno $sock, 0, sub {
             if ( $state->{state} eq 'cmd' ) {
                 my $ret = recv($sock, my $buf, 28 - length($state->{buf}), 0);
@@ -348,10 +349,10 @@ sub connection_manager {
                 }
                 if ( !defined $ret ) {
                     warn "failed to recv from sock: $!";
-                    return;                                        
+                    return;
                 }
                 if ( defined $buf && length $buf == 0) {
-                    return;                   
+                    return;
                 }
                 $state->{buf} .= $buf;
                 return if length $state->{buf} < 28;
@@ -404,11 +405,12 @@ sub connection_manager {
                 $self->update_stats();
                 $wait_read{$sockid} = AE::io $fd, 0, sub {
                     delete $wait_read{$sockid};
-                    $self->queued_send($sockid); 
+                    $self->queued_send($sockid);
                 };
             } # cmd
         } # AE::io
     } # for 1..max_workers
+
     $manager{workers} = \%workers;
     $cv->recv;
 }
@@ -486,7 +488,7 @@ sub request_worker {
             for ( @{$self->{fhlist}} ) {
                 vec($self->{fhbits}, fileno $_, 1) = 1;
             }
-            
+
             my $max_reqs_per_child = $self->_calc_minmax_per_child(
                 $self->{max_reqs_per_child},
                 $self->{min_reqs_per_child}
@@ -497,7 +499,7 @@ sub request_worker {
             );
 
             my $proc_req_count = 0;
-            
+
             $self->{term_received} = 0;
             $self->{stop_accept} = 0;
             local $SIG{TERM} = sub {
@@ -514,11 +516,9 @@ sub request_worker {
             local $SIG{PIPE} = 'IGNORE';
 
             my $next_conn;
-
             while ( $next_conn || $self->{stop_accept} || $proc_req_count < $max_reqs_per_child ) {
-                last if ( $self->{term_received} 
+                last if ( $self->{term_received}
                        && !$next_conn );
-                                
                 my $conn;
                 if ( $next_conn && $next_conn->{buf} ) { #read ahead or pipeline
                     $conn = $next_conn;
@@ -530,7 +530,7 @@ sub request_worker {
                     if ( $next_conn ) {
                         push @rfh, $next_conn->{fh};
                         vec($rfd, fileno $next_conn->{fh}, 1) = 1;
-                    }                    
+                    }
                     my @can_read;
                     if ( select($rfd, undef, undef, 1) > 0 ) {
                         for ( my $i = 0; $i <= $#rfh; $i++ ) {
@@ -562,8 +562,7 @@ sub request_worker {
                     $next_conn = undef;
                 }
                 next unless $conn;
-                
-                ++$proc_req_count;
+
                 my $env = {
                     SERVER_PORT => $self->{port} || 0,
                     SERVER_NAME => $self->{host} || 0,
@@ -583,7 +582,8 @@ sub request_worker {
                     'psgix.harakiri'    => 1,
                     'X_MONOCEROS_WORKER_STATS' => $self->{stats_filename},
                 };
-                $self->{_is_deferred_accept} = 1; #ready to read
+                $env->{'X_REMOTE_PID'} = $$ if $ENV{HARNESS_ACTIVE};
+                $self->{_is_deferred_accept} = 1; # ready to read
                 my $prebuf;
                 if ( exists $conn->{buf} ) {
                     $prebuf = delete $conn->{buf};
@@ -597,7 +597,7 @@ sub request_worker {
                     }
                     elsif ( defined $ret && $ret == 0) {
                         #closed?
-                        $self->cmd_to_mgr('clos', $conn->{peername}, $conn->{reqs}) 
+                        $self->cmd_to_mgr('clos', $conn->{peername}, $conn->{reqs})
                             if !$conn->{direct};
                         next;
                     }
@@ -606,16 +606,17 @@ sub request_worker {
                 my $may_keepalive = 1;
                 $may_keepalive = 0 if ($self->{term_received} || $self->{stop_accept});
                 $may_keepalive = 0 if $self->{disable_keepalive};
-                my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection, 
-                                      #  treat every connection as keepalive
-                my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app, 
-                                                         $may_keepalive, $is_keepalive, $prebuf, 
+                my $is_keepalive = 1; # to use "keepalive_timeout" in handle_connection,
+                                      # treat every connection as keepalive
+                my ($keepalive,$pipelined_buf) = $self->handle_connection($env, $conn->{fh}, $app,
+                                                         $may_keepalive, $is_keepalive, $prebuf,
                                                          $conn->{reqs});
                 # harakiri
                 if ($env->{'psgix.harakiri.commit'}) {
                     $proc_req_count = $max_reqs_per_child + 1;
                 }
 
+                ++$proc_req_count;
                 $conn->{reqs}++;
                 if ( !$keepalive ) {
                     #close
@@ -632,7 +633,7 @@ sub request_worker {
                 }
 
                 # read ahead
-                if ( $conn->{reqs} < $max_readahead_reqs &&  $proc_req_count < $max_reqs_per_child ) {
+                if ( $conn->{reqs} < $max_readahead_reqs &&  $proc_req_count <= $max_reqs_per_child ) {
                     $next_conn = $conn;
                     next;
                 }
@@ -646,7 +647,8 @@ sub request_worker {
         $pm->signal_all_children('TERM');
     };
     kill 'USR1', getppid();
-    $pm->wait_all_children;
+    my $children_left = $pm->wait_all_children;
+    warn "wait_all_children returned unterminated children. This should not happen!" if $children_left;
     exit;
 }
 
@@ -719,7 +721,7 @@ sub accept_or_recv {
                 warn sprintf("could not recv fd: %s (%d)", $!, $!);
             }
             next if $fd <= 0;
-            my $peer; 
+            my $peer;
             if ( _getpeername($fd, $peer) < 0 ) {
                 next;
             }
