@@ -24,19 +24,19 @@ Features of Monoceros
 
 \- a manager process based on [AnyEvent](https://metacpan.org/pod/AnyEvent) keeps over C10K connections
 
-\- uses [IO::FDPass](https://metacpan.org/pod/IO::FDPass) for passing a file descriptor to workers
+\- uses [IO::FDPass](https://metacpan.org/pod/IO%3A%3AFDPass) for passing a file descriptor to workers
 
 \- supports HTTP/1.1 and also supports HTTP/1.0 keepalive
 
 And this server inherit [Starlet](https://metacpan.org/pod/Starlet). Monoceros supports following features too.
 
-\- prefork and graceful shutdown using [Parallel::Prefork](https://metacpan.org/pod/Parallel::Prefork)
+\- prefork and graceful shutdown using [Parallel::Prefork](https://metacpan.org/pod/Parallel%3A%3APrefork)
 
-\- hot deploy using [Server::Starter](https://metacpan.org/pod/Server::Starter)
+\- hot deploy using [Server::Starter](https://metacpan.org/pod/Server%3A%3AStarter)
 
-\- fast HTTP processing using [HTTP::Parser::XS](https://metacpan.org/pod/HTTP::Parser::XS) (optional)
+\- fast HTTP processing using [HTTP::Parser::XS](https://metacpan.org/pod/HTTP%3A%3AParser%3A%3AXS) (optional)
 
-\- accept4(2) using [Linux::Socket::Accept4](https://metacpan.org/pod/Linux::Socket::Accept4) (optional)
+\- accept4(2) using [Linux::Socket::Accept4](https://metacpan.org/pod/Linux%3A%3ASocket%3A%3AAccept4) (optional)
 
 Currently, Monoceros does not support spawn-interval and max-keepalive-reqs.
 
@@ -87,7 +87,7 @@ For more performance. I recommends you to install these module.
 
 \- [EV](https://metacpan.org/pod/EV)
 
-\- [HTTP::Parser::XS](https://metacpan.org/pod/HTTP::Parser::XS)
+\- [HTTP::Parser::XS](https://metacpan.org/pod/HTTP%3A%3AParser%3A%3AXS)
 
 # EXPERIMENTAL FEATURES
 
@@ -98,11 +98,11 @@ For more performance. I recommends you to install these module.
 
 - sendfile
 
-    Monoceros send IO::Handle like body with sendfile(2). [Sys::Sendfile](https://metacpan.org/pod/Sys::Sendfile) is required.
+    Monoceros send IO::Handle like body with sendfile(2). [Sys::Sendfile](https://metacpan.org/pod/Sys%3A%3ASendfile) is required.
 
 # SEE ALSO
 
-[Starlet](https://metacpan.org/pod/Starlet), [Server::Starter](https://metacpan.org/pod/Server::Starter), [AnyEvent](https://metacpan.org/pod/AnyEvent), [IO::FDPass](https://metacpan.org/pod/IO::FDPass)
+[Starlet](https://metacpan.org/pod/Starlet), [Server::Starter](https://metacpan.org/pod/Server%3A%3AStarter), [AnyEvent](https://metacpan.org/pod/AnyEvent), [IO::FDPass](https://metacpan.org/pod/IO%3A%3AFDPass)
 
 # LICENSE      
 
