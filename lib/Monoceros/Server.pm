@@ -12,11 +12,12 @@ use Time::HiRes qw/time/;
 use Plack::TempBuffer;
 use Plack::Util;
 use Plack::HTTPParser qw( parse_http_request );
-use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS :sys_wait_h);
+use POSIX qw(EINTR EAGAIN EWOULDBLOCK ESPIPE ENOBUFS setuid setgid :sys_wait_h);
 use POSIX::getpeername qw/_getpeername/;
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use File::Temp qw/tempfile/;
 use Digest::MD5 qw/md5/;
+use Carp;
 
 use constant WRITER => 0;
 use constant READER => 1;
@@ -45,7 +46,6 @@ my $have_sendfile = eval {
 sub new {
     my $class = shift;
     my %args = @_;
-
     # setup before instantiation
     my $listen_sock;
     if (defined $ENV{SERVER_STARTER_PORT}) {
@@ -68,7 +68,35 @@ sub new {
             if defined $args{$_};
     }
 
+    if ($args{user}) {
+        if ($args{user} !~ m/^\d*$/s) {
+            $args{user} = getpwnam($args{user});
+        }
+        setuid($args{user});
+    }
+    if ($args{group}) {
+        if ($args{group} !~ m/^\d*$/s) {
+            $args{group} = getgrnam($args{user});
+        }
+        setgid($args{group});
+    }
+    # will daemonize
+    if ($args{daemonize}) {
+        my $pid = fork();
+        chdir '/';
+        exit if $pid;
+    }
+    # rename process
+
+    $0 = 'Monoceros Master';
+    
     my $open_max = eval { POSIX::sysconf (POSIX::_SC_OPEN_MAX ()) - 1 } || 1023;
+    
+    # will write pid_file
+    if ($args{pid}) {
+        write_pid($args{pid});
+    }
+
     my $self = bless {
         host                 => $args{host} || 0,
         port                 => $args{port} || 8080,
@@ -185,6 +213,7 @@ sub run_workers {
         unlink $self->{stats_filename};
     }
     elsif ( defined $pid ) {
+        $0 = 'Monoceros Worker';
         $self->request_worker($app);
         exit;
     }
@@ -1102,5 +1131,23 @@ sub sendfile_all {
     return $cl;
 }
 
+
+#STATIC
+sub write_pid {
+    my $file = shift;
+    if (-e $file) {
+        open PID, $file;
+        my $pid = <PID>;
+        close PID;
+        if (kill 0, $pid) {
+            croak "Can't rewrite pid of alive process\n";
+        }
+    }
+
+    open PID, '>', $file or croak "Can't open pid file: $file\n";
+    print PID $$;
+    close PID;
+    return 1;
+}
 
 1;

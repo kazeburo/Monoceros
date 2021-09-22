@@ -81,6 +81,23 @@ if set, randomizes the number of requests to continue to read a request between 
 
 disable HTTP keepalive feature (default: enabled)
 
+## \--user
+
+run Monoceros on behalf of the specified user
+
+## \--group
+
+run Monoceros on behalf of the specified group
+
+## \--daemonize
+
+run in background
+
+## \--pid
+
+use specified pid file for Monoceros Master process
+
+
 # RECOMMENDED MODULES
 
 For more performance. I recommends you to install these module.

@@ -1,0 +1,11 @@
+#!perl
+use strict;
+use Plack::Runner;
+
+sub version {
+    require Monoceros;
+    print "Monoceros $Monoceros::VERSTION";
+}
+my $runner = Plack::Runner->new(server => 'Monoceros', env => 'deployment', version_cb => \&version);
+$runner->parse_options(@ARGV);
+$runner->run;
