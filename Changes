@@ -2,6 +2,10 @@ Revision history for Perl extension Monoceros
 
 {{$NEXT}}
 
+0.29 2023-11-09T09:55:36Z
+
+  - Failsafes for stale process trees after reloads #9
+
 0.28 2021-09-22T07:50:49Z
 
   - Fixed handling of max_requests_per_child and added issue specific tests (Thank you pepl)

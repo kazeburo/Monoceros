@@ -4,7 +4,7 @@
       "Masahiro Nagano <kazeburo@gmail.com>"
    ],
    "dynamic_config" : 0,
-   "generated_by" : "Minilla/v3.1.10, CPAN::Meta::Converter version 2.150010",
+   "generated_by" : "Minilla/v3.1.23, CPAN::Meta::Converter version 2.150010",
    "license" : [
       "perl_5"
    ],
@@ -75,15 +75,16 @@
       "homepage" : "https://github.com/kazeburo/Monoceros",
       "repository" : {
          "type" : "git",
-         "url" : "git://github.com/kazeburo/Monoceros.git",
+         "url" : "https://github.com/kazeburo/Monoceros.git",
          "web" : "https://github.com/kazeburo/Monoceros"
       }
    },
-   "version" : "0.28",
+   "version" : "0.29",
    "x_contributors" : [
       "Michael Kröll <michael.kroell@geizhals.at>",
+      "Michael Kröll <pepl@cpan.org>",
       "Syohei YOSHIDA <syohex@gmail.com>"
    ],
-   "x_serialization_backend" : "JSON::PP version 4.04",
+   "x_serialization_backend" : "JSON::PP version 4.07",
    "x_static_install" : 1
 }
